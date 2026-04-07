@@ -3,28 +3,76 @@ Real-time voice command recognition with keyboard output.
 Run: python inference.py
 """
 
+import os
 import sys
 import time
 import threading
+from collections.abc import Mapping
+from pathlib import Path
+from typing import TYPE_CHECKING, TypedDict, cast
 import numpy as np
 import torch
 import sounddevice as sd
 from collections import deque
-from pynput.keyboard import Controller, Key
 
 from audio_processing import preprocess, get_mel_transform, SAMPLE_RATE, NUM_SAMPLES
 from model import VoiceCommandCNN
 from config import InferenceConfig
 
-PYNPUT_KEY_MAP = {
-    "up": Key.up,
-    "down": Key.down,
-    "left": Key.left,
-    "right": Key.right,
-    "space": Key.space,
-    "escape": Key.esc,
-    "Return": Key.enter,
-}
+
+if TYPE_CHECKING:
+    from pynput.keyboard import Controller, Key, KeyCode
+
+
+class CheckpointData(TypedDict):
+    """Shape of the model checkpoint used by inference."""
+
+    model_state_dict: Mapping[str, torch.Tensor]
+    labels: list[str]
+    num_classes: int
+    val_acc: float
+    epoch: int
+
+
+def format_keyboard_backend_error(exc: Exception) -> str:
+    """Explain common platform-specific pynput failures."""
+    base = "Keyboard control is unavailable because pynput could not start."
+
+    if sys.platform.startswith("linux"):
+        display = os.environ.get("DISPLAY")
+        session_type = os.environ.get("XDG_SESSION_TYPE", "unknown")
+        if not display:
+            return (
+                f"{base} Linux session type is '{session_type}' and DISPLAY is unset. "
+                "pynput needs X11/Xwayland, or Linux uinput access as root. "
+                f"Original error: {exc}"
+            )
+        return (
+            f"{base} On Linux, pynput depends on X11/Xwayland or uinput access. "
+            f"Original error: {exc}"
+        )
+
+    return f"{base} Original error: {exc}"
+
+
+def create_keyboard_controller() -> tuple[
+    "Controller", dict[str, "str | Key | KeyCode"]
+]:
+    """Create the pynput keyboard controller lazily with better diagnostics."""
+    try:
+        from pynput.keyboard import Controller, Key
+    except Exception as exc:
+        raise RuntimeError(format_keyboard_backend_error(exc)) from exc
+
+    return Controller(), {
+        "up": Key.up,
+        "down": Key.down,
+        "left": Key.left,
+        "right": Key.right,
+        "space": Key.space,
+        "escape": Key.esc,
+        "Return": Key.enter,
+    }
 
 
 class VoiceController:
@@ -40,7 +88,7 @@ class VoiceController:
         self.config = config or InferenceConfig()
         self.debug = debug
         self.running = False
-        self.keyboard = Controller()
+        self.keyboard, self._key_map = create_keyboard_controller()
         self._last_press_time = 0.0
         self._last_fired = None
         self._vad_threshold = 0.005
@@ -48,21 +96,31 @@ class VoiceController:
         self._streak = 0
         self._quiet_count = 0
 
-        self.device = torch.device(self.config.device
-                                    if torch.cuda.is_available()
-                                    else "cpu")
+        self.device = torch.device(
+            self.config.device if torch.cuda.is_available() else "cpu"
+        )
         print(f"Device: {self.device}")
 
-        checkpoint = torch.load(self.config.model_path, map_location=self.device,
-                                weights_only=True)
+        model_path = Path(self.config.model_path).expanduser().resolve()
+        if not model_path.is_file():
+            raise FileNotFoundError(
+                f"Model checkpoint not found at {model_path}. "
+                "The trained model is not tracked in git. "
+                "Run `python download_model.py` on this machine or copy the checkpoint "
+                "into the repo's models directory."
+            )
+
+        checkpoint = self._load_checkpoint(model_path)
         self.labels = checkpoint["labels"]
-        num_classes = checkpoint["num_classes"]
+        num_classes = len(self.labels)
 
         self.model = VoiceCommandCNN(num_classes=num_classes).to(self.device)
         self.model.load_state_dict(checkpoint["model_state_dict"])
         self.model.eval()
-        print(f"Model loaded (val_acc={checkpoint['val_acc']:.4f}, "
-              f"epoch {checkpoint['epoch']})")
+        print(
+            f"Model loaded (val_acc={checkpoint['val_acc']:.4f}, "
+            f"epoch {checkpoint['epoch']})"
+        )
 
         self.mel_transform = get_mel_transform()
 
@@ -85,11 +143,58 @@ class VoiceController:
 
     def _press_key(self, key_name: str):
         """Press a keyboard key using pynput (works on macOS, Linux, Windows)."""
-        key = PYNPUT_KEY_MAP.get(key_name)
+        key = self._key_map.get(key_name)
         if key is None:
             key = key_name
         self.keyboard.press(key)
         self.keyboard.release(key)
+
+    def _load_checkpoint(self, model_path: Path) -> CheckpointData:
+        """Load the model checkpoint with compatibility for older torch versions."""
+        try:
+            checkpoint = torch.load(
+                model_path, map_location=self.device, weights_only=True
+            )
+        except TypeError:
+            checkpoint = torch.load(model_path, map_location=self.device)
+
+        return cast(CheckpointData, checkpoint)
+
+    def _resolve_input_device(self, device: int | None) -> int:
+        """Resolve and validate the input device used for calibration and capture."""
+        try:
+            devices = cast(list[dict[str, object]], list(sd.query_devices()))
+        except Exception as exc:
+            raise RuntimeError(
+                "Unable to query audio devices. Make sure PortAudio is installed and "
+                "the microphone is available. On Arch Linux, install the `portaudio` package."
+            ) from exc
+
+        input_devices = []
+        for index, info in enumerate(devices):
+            channel_count = info.get("max_input_channels")
+            if isinstance(channel_count, (int, float)) and channel_count > 0:
+                input_devices.append(index)
+
+        if not input_devices:
+            raise RuntimeError("No input audio devices were found.")
+
+        if device is not None:
+            if device not in input_devices:
+                raise ValueError(f"Input device {device} is not a valid microphone.")
+            return device
+
+        default_device = sd.default.device
+        default_input = None
+        if isinstance(default_device, (list, tuple)) and default_device:
+            default_input = default_device[0]
+        elif isinstance(default_device, int):
+            default_input = default_device
+
+        if isinstance(default_input, int) and default_input in input_devices:
+            return default_input
+
+        return input_devices[0]
 
     def _dbg(self, msg: str):
         if self.debug:
@@ -111,17 +216,21 @@ class VoiceController:
         self._buffer.extend(samples.tolist())
         self._samples_since_last_classify += frames
 
-        if (self._samples_since_last_classify >= self._stride_samples
-                and len(self._buffer) >= self._window_samples):
+        if (
+            self._samples_since_last_classify >= self._stride_samples
+            and len(self._buffer) >= self._window_samples
+        ):
             self._samples_since_last_classify = 0
 
-            audio = np.array(list(self._buffer), dtype=np.float32)[-self._window_samples:]
+            audio = np.array(list(self._buffer), dtype=np.float32)[
+                -self._window_samples :
+            ]
 
             seg_len = int(SAMPLE_RATE * 0.2)
             level = 0.0
             for seg_start in range(0, len(audio) - seg_len + 1, seg_len // 2):
-                seg = audio[seg_start:seg_start + seg_len]
-                seg_rms = np.sqrt(np.mean(seg ** 2))
+                seg = audio[seg_start : seg_start + seg_len]
+                seg_rms = np.sqrt(np.mean(seg**2))
                 if seg_rms > level:
                     level = seg_rms
             is_speech = level >= self._vad_threshold
@@ -129,7 +238,9 @@ class VoiceController:
             if self.debug:
                 bar = "#" * int(min(level / self._vad_threshold, 5) * 10)
                 state = "SPEECH" if is_speech else "quiet"
-                self._dbg(f"lvl={level:.5f} [{bar:<50}] {state} streak={self._streak} prev={self._prev_prediction} fired={self._last_fired}")
+                self._dbg(
+                    f"lvl={level:.5f} [{bar:<50}] {state} streak={self._streak} prev={self._prev_prediction} fired={self._last_fired}"
+                )
 
             if not is_speech:
                 self._prev_prediction = None
@@ -140,8 +251,9 @@ class VoiceController:
 
             waveform = torch.from_numpy(audio).unsqueeze(0)
             t_start = time.perf_counter()
-            threading.Thread(target=self._classify, args=(waveform, t_start),
-                           daemon=True).start()
+            threading.Thread(
+                target=self._classify, args=(waveform, t_start), daemon=True
+            ).start()
 
     @torch.no_grad()
     def _classify(self, waveform: torch.Tensor, t_capture: float):
@@ -161,7 +273,7 @@ class VoiceController:
         logits = self.model(mel)
         probs = torch.softmax(logits, dim=1)[0]
 
-        best_idx = probs.argmax().item()
+        best_idx = int(probs.argmax().item())
         best_label = self.labels[best_idx]
         best_prob = probs[best_idx].item()
 
@@ -179,8 +291,7 @@ class VoiceController:
             self._streak = 1
 
         needed = 1 if best_prob >= 0.99 else 2
-        if (self._streak >= needed
-                and best_prob >= self.config.confidence_threshold):
+        if self._streak >= needed and best_prob >= self.config.confidence_threshold:
             now = time.time()
             if now - self._last_press_time >= self.config.cooldown_sec:
                 key = self.config.key_map.get(best_label)
@@ -197,25 +308,33 @@ class VoiceController:
                     )
                     sys.stdout.flush()
 
-    def _calibrate_noise(self):
+    def _calibrate_noise(self, device: int | None = None):
         """
         Record 2 seconds of silence to set VAD threshold above background noise.
 
         Sets the threshold to 2x background RMS, capped between 0.001 and 0.01.
         """
+        input_device = self._resolve_input_device(device)
         print("Calibrating background noise — stay QUIET for 2 seconds...")
         time.sleep(0.5)
-        audio = sd.rec(SAMPLE_RATE * 2, samplerate=SAMPLE_RATE, channels=1, dtype="float32")
+        audio = sd.rec(
+            SAMPLE_RATE * 2,
+            samplerate=SAMPLE_RATE,
+            channels=1,
+            dtype="float32",
+            device=input_device,
+        )
         sd.wait()
-        bg_rms = np.sqrt(np.mean(audio ** 2))
+        bg_rms = np.sqrt(np.mean(audio**2))
         self._vad_threshold = min(bg_rms * 2.0, 0.01)
         self._vad_threshold = max(self._vad_threshold, 0.001)
         print(f"Background RMS: {bg_rms:.6f}, VAD threshold: {self._vad_threshold:.6f}")
 
     def run(self):
         """Start listening and processing voice commands."""
-        self._calibrate_noise()
-        print(f"\nListening on default mic (rate={SAMPLE_RATE}Hz)...")
+        input_device = self._resolve_input_device(None)
+        self._calibrate_noise(input_device)
+        print(f"\nListening on input device {input_device} (rate={SAMPLE_RATE}Hz)...")
         print("Speak a command. Press Ctrl+C to stop.\n")
 
         self.running = True
@@ -226,6 +345,7 @@ class VoiceController:
                 dtype="float32",
                 blocksize=self._chunk_samples,
                 callback=self._audio_callback,
+                device=input_device,
             ):
                 while self.running:
                     time.sleep(0.1)
@@ -233,7 +353,9 @@ class VoiceController:
             print("\nStopped.")
         except Exception as e:
             print(f"Error: {e}")
-            print("Make sure your microphone is available and sounddevice is installed.")
+            print(
+                "Make sure your microphone is available and sounddevice is installed."
+            )
 
     def test_latency(self):
         """Measure inference latency."""
@@ -253,11 +375,17 @@ class VoiceController:
             times.append(elapsed)
 
         avg = sum(times) / len(times)
-        print(f"Inference latency: {avg:.2f}ms avg "
-              f"(min={min(times):.2f}ms, max={max(times):.2f}ms)")
-        print(f"Stride: {self.config.stride_duration_sec*1000:.0f}ms "
-              f"(classify every {self.config.stride_duration_sec*1000:.0f}ms)")
-        print(f"Total expected latency: ~{avg + self.config.stride_duration_sec*1000:.0f}ms")
+        print(
+            f"Inference latency: {avg:.2f}ms avg "
+            f"(min={min(times):.2f}ms, max={max(times):.2f}ms)"
+        )
+        print(
+            f"Stride: {self.config.stride_duration_sec * 1000:.0f}ms "
+            f"(classify every {self.config.stride_duration_sec * 1000:.0f}ms)"
+        )
+        print(
+            f"Total expected latency: ~{avg + self.config.stride_duration_sec * 1000:.0f}ms"
+        )
 
 
 if __name__ == "__main__":

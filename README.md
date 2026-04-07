@@ -6,19 +6,42 @@ Built on a small CNN trained on Google Speech Commands v2.
 
 ## Setup
 
+### macOS
+
 ```bash
 python3.12 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-The model isn't included in the repo (too large for git). Train it:
+### Arch Linux
+
+Install the system packages first:
+
+```bash
+sudo pacman -S python tk portaudio
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+### Windows PowerShell
+
+```powershell
+py -3.12 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+```
+
+The trained model is not included in the repo. `models/voice_command_model.pt` is local-only, so each machine needs its own copy. Create it with:
 
 ```bash
 python download_model.py
 ```
 
 This downloads the Google Speech Commands v2 dataset (~2.3 GB) and trains for 30 epochs. Takes about 30-40 minutes on CPU.
+
+If you already trained the model on another machine, copying `models/voice_command_model.pt` into this repo also works.
 
 ## Usage
 
@@ -39,6 +62,13 @@ The GUI lets you pick your mic, set the confidence threshold, and bind voice com
 ```bash
 python inference.py --debug
 ```
+
+## Platform Notes
+
+- `sounddevice` needs a working PortAudio installation. On Arch Linux, install the `portaudio` package.
+- The GUI uses `tkinter`. On Arch Linux, install the `tk` package.
+- Keyboard output uses `pynput`. On Linux, that means X11/Xwayland or `uinput` access. Pure Wayland sessions may not support global key injection.
+- The checkpoint path is resolved relative to the repo, but the file still has to exist on that machine.
 
 ## How it works
 

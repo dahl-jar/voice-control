@@ -3,7 +3,16 @@ Training and inference configuration. Edit this to tune the system.
 """
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import List
+
+
+REPO_ROOT = Path(__file__).resolve().parent
+
+
+def repo_path(*parts: str) -> str:
+    """Build an absolute path rooted at the repository directory."""
+    return str(REPO_ROOT.joinpath(*parts))
 
 
 @dataclass
@@ -29,9 +38,15 @@ class TrainConfig:
     @param num_workers: Number of dataloader workers.
     @param model_path: Path to save the trained model.
     """
-    commands: List[str] = field(default_factory=lambda: [
-        "up", "down", "left", "right",
-    ])
+
+    commands: List[str] = field(
+        default_factory=lambda: [
+            "up",
+            "down",
+            "left",
+            "right",
+        ]
+    )
 
     epochs: int = 30
     batch_size: int = 128
@@ -47,11 +62,11 @@ class TrainConfig:
     augment_speed: bool = True
     speed_range: tuple = (0.9, 1.1)
 
-    data_dir: str = "./data"
+    data_dir: str = repo_path("data")
     val_split: float = 0.2
     num_workers: int = 4
 
-    model_path: str = "./models/voice_command_model.pt"
+    model_path: str = repo_path("models", "voice_command_model.pt")
 
 
 @dataclass
@@ -70,7 +85,8 @@ class InferenceConfig:
     @param key_map: Mapping from voice command to keyboard key.
     @param device: Torch device for inference.
     """
-    model_path: str = "./models/voice_command_model.pt"
+
+    model_path: str = repo_path("models", "voice_command_model.pt")
 
     confidence_threshold: float = 0.93
 
@@ -80,11 +96,13 @@ class InferenceConfig:
 
     cooldown_sec: float = 0.5
 
-    key_map: dict = field(default_factory=lambda: {
-        "up": "up",
-        "down": "down",
-        "left": "left",
-        "right": "right",
-    })
+    key_map: dict = field(
+        default_factory=lambda: {
+            "up": "up",
+            "down": "down",
+            "left": "left",
+            "right": "right",
+        }
+    )
 
     device: str = "cuda"

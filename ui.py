@@ -6,26 +6,42 @@ Run: python ui.py
 import threading
 import tkinter as tk
 from tkinter import ttk
+from typing import TYPE_CHECKING
 
 import sounddevice as sd
-from pynput.keyboard import Controller, Key
 
-from inference import VoiceController
+from inference import VoiceController, format_keyboard_backend_error
 from config import InferenceConfig
 
-SPECIAL_KEYS = {
-    "up": Key.up,
-    "down": Key.down,
-    "left": Key.left,
-    "right": Key.right,
-    "space": Key.space,
-    "esc": Key.esc,
-    "enter": Key.enter,
-    "tab": Key.tab,
-    "shift": Key.shift,
-    "ctrl": Key.ctrl,
-    "alt": Key.alt,
-}
+if TYPE_CHECKING:
+    from pynput.keyboard import Controller, Key, KeyCode
+
+
+SPECIAL_KEYS = {}
+
+
+def create_ui_keyboard_controller() -> tuple[
+    "Controller", dict[str, "str | Key | KeyCode"]
+]:
+    """Create the GUI keyboard backend lazily with platform-aware errors."""
+    try:
+        from pynput.keyboard import Controller, Key
+    except Exception as exc:
+        raise RuntimeError(format_keyboard_backend_error(exc)) from exc
+
+    return Controller(), {
+        "up": Key.up,
+        "down": Key.down,
+        "left": Key.left,
+        "right": Key.right,
+        "space": Key.space,
+        "esc": Key.esc,
+        "enter": Key.enter,
+        "tab": Key.tab,
+        "shift": Key.shift,
+        "ctrl": Key.ctrl,
+        "alt": Key.alt,
+    }
 
 
 def parse_key(key_str):
@@ -59,7 +75,9 @@ class VoiceCommandApp:
 
         self.config = InferenceConfig()
         self.commands = {}
-        self.keyboard = Controller()
+        self.keyboard, special_keys = create_ui_keyboard_controller()
+        SPECIAL_KEYS.clear()
+        SPECIAL_KEYS.update(special_keys)
         self.selected_input_device = None
         self.controller = None
         self._engine_thread = None
@@ -93,6 +111,7 @@ class VoiceCommandApp:
         Replace _press_key and the stdout writes in VoiceController
         with pynput key presses and UI callbacks.
         """
+        assert self.controller is not None
         controller = self.controller
 
         def patched_press_key(key_name):
@@ -104,8 +123,6 @@ class VoiceCommandApp:
                 self.keyboard.release(parsed)
 
         controller._press_key = patched_press_key
-
-        original_classify = controller._classify
 
         def patched_classify(waveform, t_capture):
             import time
@@ -119,7 +136,7 @@ class VoiceCommandApp:
                 logits = controller.model(mel)
                 probs = torch.softmax(logits, dim=1)[0]
 
-            best_idx = probs.argmax().item()
+            best_idx = int(probs.argmax().item())
             best_label = controller.labels[best_idx]
             best_prob = probs[best_idx].item()
 
@@ -134,11 +151,15 @@ class VoiceCommandApp:
                 controller._prev_prediction = best_label
                 controller._streak = 1
 
-            self.root.after(0, self.status_var.set, f"Heard: {best_label} ({best_prob:.2f})")
+            self.root.after(
+                0, self.status_var.set, f"Heard: {best_label} ({best_prob:.2f})"
+            )
 
             needed = 1 if best_prob >= 0.99 else 2
-            if (controller._streak >= needed
-                    and best_prob >= controller.config.confidence_threshold):
+            if (
+                controller._streak >= needed
+                and best_prob >= controller.config.confidence_threshold
+            ):
                 now = time.time()
                 if now - controller._last_press_time >= controller.config.cooldown_sec:
                     key = controller.config.key_map.get(best_label)
@@ -153,12 +174,14 @@ class VoiceCommandApp:
                         patched_press_key(best_label)
 
                         self.root.after(
-                            0, self.metrics_var.set,
-                            f"Inference: {latency_ms:.1f} ms | Conf: {best_prob:.3f}"
+                            0,
+                            self.metrics_var.set,
+                            f"Inference: {latency_ms:.1f} ms | Conf: {best_prob:.3f}",
                         )
                         self.root.after(
-                            0, self._log,
-                            f"[{best_label}] conf={best_prob:.3f} latency={latency_ms:.1f}ms"
+                            0,
+                            self._log,
+                            f"[{best_label}] conf={best_prob:.3f} latency={latency_ms:.1f}ms",
                         )
                         self.root.after(
                             0, self.status_var.set, f"Detected: {best_label}"
@@ -168,6 +191,7 @@ class VoiceCommandApp:
 
     def _build_ui(self):
         """Construct all tkinter widgets."""
+        assert self.controller is not None
         frame = ttk.Frame(self.root, padding=10)
         frame.pack(fill="both", expand=True)
 
@@ -182,7 +206,8 @@ class VoiceCommandApp:
         self.mic_dropdown.grid(row=0, column=1, padx=5, pady=5, sticky="ew")
         self.mic_dropdown.bind("<<ComboboxSelected>>", self._on_device_changed)
         ttk.Button(
-            mic_frame, text="Refresh",
+            mic_frame,
+            text="Refresh",
             command=self.load_input_devices,
         ).grid(row=0, column=2, padx=5, pady=5)
 
@@ -197,18 +222,27 @@ class VoiceCommandApp:
             label for label in self.controller.labels if not label.startswith("_")
         )
         self.command_dropdown = ttk.Combobox(
-            frame, textvariable=self.command_var, values=voice_options,
-            width=22, state="readonly"
+            frame,
+            textvariable=self.command_var,
+            values=voice_options,
+            width=22,
+            state="readonly",
         )
         self.command_dropdown.grid(row=2, column=0, padx=5, pady=5)
 
         self.key_entry = ttk.Entry(frame, width=10)
         self.key_entry.grid(row=2, column=1, padx=5)
 
-        ttk.Button(frame, text="Add", command=self.add_binding).grid(row=2, column=2, padx=5)
-        ttk.Button(frame, text="Remove", command=self.remove_binding).grid(row=2, column=3, padx=5)
+        ttk.Button(frame, text="Add", command=self.add_binding).grid(
+            row=2, column=2, padx=5
+        )
+        ttk.Button(frame, text="Remove", command=self.remove_binding).grid(
+            row=2, column=3, padx=5
+        )
 
-        self.tree = ttk.Treeview(frame, columns=("command", "key"), show="headings", height=10)
+        self.tree = ttk.Treeview(
+            frame, columns=("command", "key"), show="headings", height=10
+        )
         self.tree.heading("command", text="Voice Command")
         self.tree.heading("key", text="Key")
         self.tree.column("command", width=180)
@@ -225,8 +259,12 @@ class VoiceCommandApp:
 
         ttk.Label(btn_frame, text="Threshold:").pack(side="left", padx=(10, 2))
         ttk.Spinbox(
-            btn_frame, from_=0.1, to=1.0, increment=0.05,
-            textvariable=self.confidence_var, width=5
+            btn_frame,
+            from_=0.1,
+            to=1.0,
+            increment=0.05,
+            textvariable=self.confidence_var,
+            width=5,
         ).pack(side="left")
 
         ttk.Label(frame, textvariable=self.status_var, font=("Helvetica", 11)).grid(
@@ -241,6 +279,7 @@ class VoiceCommandApp:
 
     def _add_default_bindings(self):
         """Populate bindings from config.key_map."""
+        assert self.tree is not None
         for command, key_name in self.config.key_map.items():
             parsed = parse_key(key_name)
             if parsed is not None:
@@ -248,6 +287,8 @@ class VoiceCommandApp:
                 self.tree.insert("", "end", values=(command, key_name))
 
     def add_binding(self):
+        assert self.key_entry is not None
+        assert self.tree is not None
         command = self.command_var.get().strip()
         key_name = self.key_entry.get().strip().lower()
         parsed = parse_key(key_name)
@@ -264,6 +305,7 @@ class VoiceCommandApp:
         self.key_entry.delete(0, tk.END)
 
     def remove_binding(self):
+        assert self.tree is not None
         for item in self.tree.selection():
             vals = self.tree.item(item)["values"]
             if vals:
@@ -271,6 +313,7 @@ class VoiceCommandApp:
             self.tree.delete(item)
 
     def toggle_commands(self):
+        assert self.controller is not None
         if self.controller.running:
             self._stop_engine()
         else:
@@ -278,42 +321,51 @@ class VoiceCommandApp:
 
     def _start_engine(self):
         """Start calibration + listening in a background thread."""
-        self.start_btn.config(text="Stop Commands")
+        assert self.controller is not None
+        assert self.start_btn is not None
+        controller = self.controller
+        start_btn = self.start_btn
+        start_btn.config(text="Stop Commands")
         self.status_var.set("Calibrating noise — stay quiet...")
         self.mic_status_var.set("Calibrating...")
 
         def _bg():
             dev = self.selected_input_device
-            self.controller._calibrate_noise()
+            controller._calibrate_noise(dev)
             self.root.after(0, self.mic_status_var.set, "Listening")
             self.root.after(0, self.status_var.set, "Listening for speech...")
 
-            self.controller.running = True
+            controller.running = True
             try:
                 with sd.InputStream(
                     samplerate=16000,
                     channels=1,
                     dtype="float32",
-                    blocksize=self.controller._chunk_samples,
-                    callback=self.controller._audio_callback,
+                    blocksize=controller._chunk_samples,
+                    callback=controller._audio_callback,
                     device=dev,
                 ):
-                    while self.controller.running:
+                    while controller.running:
                         import time
+
                         time.sleep(0.1)
             except Exception as e:
                 self.root.after(0, self.status_var.set, f"Audio error: {e}")
             finally:
-                self.controller.running = False
-                self.root.after(0, self.start_btn.config, {"text": "Start Commands"})
+                controller.running = False
+                self.root.after(0, start_btn.config, {"text": "Start Commands"})
                 self.root.after(0, self.mic_status_var.set, "Microphone off")
 
         self._engine_thread = threading.Thread(target=_bg, daemon=True)
         self._engine_thread.start()
 
     def _stop_engine(self):
-        self.controller.running = False
-        self.start_btn.config(text="Start Commands")
+        assert self.controller is not None
+        assert self.start_btn is not None
+        controller = self.controller
+        start_btn = self.start_btn
+        controller.running = False
+        start_btn.config(text="Start Commands")
         self.status_var.set("Stopped")
         self.mic_status_var.set("Microphone off")
 
@@ -324,12 +376,14 @@ class VoiceCommandApp:
             pass
 
     def _log(self, message):
+        assert self.log_text is not None
         self.log_text.config(state="normal")
         self.log_text.insert("end", message + "\n")
         self.log_text.see("end")
         self.log_text.config(state="disabled")
 
     def load_input_devices(self):
+        assert self.mic_dropdown is not None
         current = self.device_var.get().strip()
         try:
             devices = sd.query_devices()
@@ -350,7 +404,9 @@ class VoiceCommandApp:
 
         selected = current if current in labels else None
         if selected is None and default_input is not None and default_input >= 0:
-            selected = next((l for l in labels if l.startswith(f"{default_input}:")), None)
+            selected = next(
+                (l for l in labels if l.startswith(f"{default_input}:")), None
+            )
         if selected is None:
             selected = labels[0]
 
@@ -358,6 +414,7 @@ class VoiceCommandApp:
         self.selected_input_device = int(selected.split(":", 1)[0])
 
     def _on_device_changed(self, _event=None):
+        assert self.controller is not None
         selected = self.device_var.get().strip()
         if not selected:
             return
@@ -369,14 +426,18 @@ class VoiceCommandApp:
             self._start_engine()
 
     def _on_close(self):
+        assert self.controller is not None
         self.controller.running = False
         self.root.destroy()
 
 
 def main():
-    app_root = tk.Tk()
-    VoiceCommandApp(app_root)
-    app_root.mainloop()
+    try:
+        app_root = tk.Tk()
+        VoiceCommandApp(app_root)
+        app_root.mainloop()
+    except Exception as exc:
+        raise SystemExit(str(exc)) from exc
 
 
 if __name__ == "__main__":
