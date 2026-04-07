@@ -51,6 +51,20 @@ def create_keyboard_controller() -> tuple[
     }
 
 
+def get_default_input_device() -> int | None:
+    """Return the default input device index from sounddevice, if available."""
+    default_device = sd.default.device
+    if isinstance(default_device, int):
+        return default_device if default_device >= 0 else None
+
+    try:
+        default_input = int(default_device[0])
+    except (IndexError, KeyError, TypeError, ValueError):
+        return None
+
+    return default_input if default_input >= 0 else None
+
+
 class VoiceController:
     def __init__(self, config: InferenceConfig | None = None, debug: bool = False):
         """
@@ -71,6 +85,8 @@ class VoiceController:
         self._prev_prediction = None
         self._streak = 0
         self._quiet_count = 0
+        self._capture_sample_rate = SAMPLE_RATE
+        self._input_device = None
 
         self.device = torch.device(
             self.config.device if torch.cuda.is_available() else "cpu"
@@ -100,13 +116,7 @@ class VoiceController:
 
         self.mel_transform = get_mel_transform()
 
-        chunk_samples = int(self.config.chunk_duration_sec * SAMPLE_RATE)
-        window_samples = int(self.config.window_duration_sec * SAMPLE_RATE)
-        self._buffer = deque(maxlen=window_samples)
-        self._chunk_samples = chunk_samples
-        self._window_samples = window_samples
-        self._stride_samples = int(self.config.stride_duration_sec * SAMPLE_RATE)
-        self._samples_since_last_classify = 0
+        self._configure_capture_timing(SAMPLE_RATE)
 
         self._command_indices = []
         for i, label in enumerate(self.labels):
@@ -160,17 +170,45 @@ class VoiceController:
                 raise ValueError(f"Input device {device} is not a valid microphone.")
             return device
 
-        default_device = sd.default.device
-        default_input = None
-        if isinstance(default_device, (list, tuple)) and default_device:
-            default_input = default_device[0]
-        elif isinstance(default_device, int):
-            default_input = default_device
-
+        default_input = get_default_input_device()
         if isinstance(default_input, int) and default_input in input_devices:
             return default_input
 
         return input_devices[0]
+
+    def _configure_capture_timing(self, sample_rate: int) -> None:
+        """Rebuild streaming buffers for the active microphone sample rate."""
+        self._capture_sample_rate = sample_rate
+        self._chunk_samples = int(self.config.chunk_duration_sec * sample_rate)
+        self._window_samples = int(self.config.window_duration_sec * sample_rate)
+        self._stride_samples = int(self.config.stride_duration_sec * sample_rate)
+        self._buffer = deque(maxlen=self._window_samples)
+        self._samples_since_last_classify = 0
+
+    def _prepare_input_stream(self, device: int | None) -> int:
+        """Resolve the selected microphone and capture at its native input rate."""
+        input_device = self._resolve_input_device(device)
+        device_info = cast(dict[str, object], sd.query_devices(input_device))
+        default_sample_rate = device_info.get("default_samplerate")
+        if (
+            not isinstance(default_sample_rate, (int, float))
+            or default_sample_rate <= 0
+        ):
+            raise RuntimeError(
+                f"Input device {input_device} does not report a valid sample rate."
+            )
+
+        capture_sample_rate = int(round(default_sample_rate))
+        sd.check_input_settings(
+            device=input_device,
+            samplerate=capture_sample_rate,
+            channels=1,
+            dtype="float32",
+        )
+
+        self._input_device = input_device
+        self._configure_capture_timing(capture_sample_rate)
+        return input_device
 
     def _dbg(self, msg: str):
         if self.debug:
@@ -202,7 +240,7 @@ class VoiceController:
                 -self._window_samples :
             ]
 
-            seg_len = int(SAMPLE_RATE * 0.2)
+            seg_len = int(self._capture_sample_rate * 0.2)
             level = 0.0
             for seg_start in range(0, len(audio) - seg_len + 1, seg_len // 2):
                 seg = audio[seg_start : seg_start + seg_len]
@@ -243,7 +281,7 @@ class VoiceController:
         @param waveform: Audio tensor from the buffer window.
         @param t_capture: perf_counter timestamp at capture time for latency measurement.
         """
-        mel = preprocess(waveform, SAMPLE_RATE, self.mel_transform)
+        mel = preprocess(waveform, self._capture_sample_rate, self.mel_transform)
         mel = mel.unsqueeze(0).to(self.device)
 
         logits = self.model(mel)
@@ -290,12 +328,12 @@ class VoiceController:
 
         Sets the threshold to 2x background RMS, capped between 0.001 and 0.01.
         """
-        input_device = self._resolve_input_device(device)
+        input_device = self._prepare_input_stream(device)
         print("Calibrating background noise — stay QUIET for 2 seconds...")
         time.sleep(0.5)
         audio = sd.rec(
-            SAMPLE_RATE * 2,
-            samplerate=SAMPLE_RATE,
+            self._capture_sample_rate * 2,
+            samplerate=self._capture_sample_rate,
             channels=1,
             dtype="float32",
             device=input_device,
@@ -308,15 +346,18 @@ class VoiceController:
 
     def run(self):
         """Start listening and processing voice commands."""
-        input_device = self._resolve_input_device(None)
+        input_device = self._prepare_input_stream(None)
         self._calibrate_noise(input_device)
-        print(f"\nListening on input device {input_device} (rate={SAMPLE_RATE}Hz)...")
+        print(
+            f"\nListening on input device {input_device} "
+            f"(rate={self._capture_sample_rate}Hz, model={SAMPLE_RATE}Hz)..."
+        )
         print("Speak a command. Press Ctrl+C to stop.\n")
 
         self.running = True
         try:
             with sd.InputStream(
-                samplerate=SAMPLE_RATE,
+                samplerate=self._capture_sample_rate,
                 channels=1,
                 dtype="float32",
                 blocksize=self._chunk_samples,

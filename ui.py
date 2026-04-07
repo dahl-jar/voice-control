@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 import sounddevice as sd
 
 from config import InferenceConfig
-from inference import VoiceController
+from inference import VoiceController, get_default_input_device
 from keyboard_backend import load_keyboard_backend
 
 if TYPE_CHECKING:
@@ -125,9 +125,13 @@ class VoiceCommandApp:
         def patched_classify(waveform, t_capture):
             import time
             import torch
-            from audio_processing import preprocess, SAMPLE_RATE
+            from audio_processing import preprocess
 
-            mel = preprocess(waveform, SAMPLE_RATE, controller.mel_transform)
+            mel = preprocess(
+                waveform,
+                controller._capture_sample_rate,
+                controller.mel_transform,
+            )
             mel = mel.unsqueeze(0).to(controller.device)
 
             with torch.no_grad():
@@ -329,7 +333,7 @@ class VoiceCommandApp:
 
         def _bg():
             try:
-                input_device = controller._resolve_input_device(
+                input_device = controller._prepare_input_stream(
                     self.selected_input_device
                 )
                 controller._calibrate_noise(input_device)
@@ -338,7 +342,7 @@ class VoiceCommandApp:
 
                 controller.running = True
                 with sd.InputStream(
-                    samplerate=16000,
+                    samplerate=controller._capture_sample_rate,
                     channels=1,
                     dtype="float32",
                     blocksize=controller._chunk_samples,
@@ -400,8 +404,7 @@ class VoiceCommandApp:
         if not labels:
             return
 
-        dd = sd.default.device
-        default_input = dd[0] if isinstance(dd, (list, tuple)) and dd else None
+        default_input = get_default_input_device()
 
         selected = current if current in labels else None
         if selected is None and default_input is not None and default_input >= 0:
