@@ -10,8 +10,9 @@ from typing import TYPE_CHECKING
 
 import sounddevice as sd
 
-from inference import VoiceController, format_keyboard_backend_error
 from config import InferenceConfig
+from inference import VoiceController
+from keyboard_backend import load_keyboard_backend
 
 if TYPE_CHECKING:
     from pynput.keyboard import Controller, Key, KeyCode
@@ -24,23 +25,20 @@ def create_ui_keyboard_controller() -> tuple[
     "Controller", dict[str, "str | Key | KeyCode"]
 ]:
     """Create the GUI keyboard backend lazily with platform-aware errors."""
-    try:
-        from pynput.keyboard import Controller, Key
-    except Exception as exc:
-        raise RuntimeError(format_keyboard_backend_error(exc)) from exc
+    controller, key = load_keyboard_backend()
 
-    return Controller(), {
-        "up": Key.up,
-        "down": Key.down,
-        "left": Key.left,
-        "right": Key.right,
-        "space": Key.space,
-        "esc": Key.esc,
-        "enter": Key.enter,
-        "tab": Key.tab,
-        "shift": Key.shift,
-        "ctrl": Key.ctrl,
-        "alt": Key.alt,
+    return controller, {
+        "up": key.up,
+        "down": key.down,
+        "left": key.left,
+        "right": key.right,
+        "space": key.space,
+        "esc": key.esc,
+        "enter": key.enter,
+        "tab": key.tab,
+        "shift": key.shift,
+        "ctrl": key.ctrl,
+        "alt": key.alt,
     }
 
 
@@ -330,26 +328,29 @@ class VoiceCommandApp:
         self.mic_status_var.set("Calibrating...")
 
         def _bg():
-            dev = self.selected_input_device
-            controller._calibrate_noise(dev)
-            self.root.after(0, self.mic_status_var.set, "Listening")
-            self.root.after(0, self.status_var.set, "Listening for speech...")
-
-            controller.running = True
             try:
+                input_device = controller._resolve_input_device(
+                    self.selected_input_device
+                )
+                controller._calibrate_noise(input_device)
+                self.root.after(0, self.mic_status_var.set, "Listening")
+                self.root.after(0, self.status_var.set, "Listening for speech...")
+
+                controller.running = True
                 with sd.InputStream(
                     samplerate=16000,
                     channels=1,
                     dtype="float32",
                     blocksize=controller._chunk_samples,
                     callback=controller._audio_callback,
-                    device=dev,
+                    device=input_device,
                 ):
                     while controller.running:
                         import time
 
                         time.sleep(0.1)
             except Exception as e:
+                self.root.after(0, self.mic_status_var.set, "Microphone off")
                 self.root.after(0, self.status_var.set, f"Audio error: {e}")
             finally:
                 controller.running = False

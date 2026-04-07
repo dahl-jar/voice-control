@@ -9,20 +9,20 @@ Usage:
 import os
 import sys
 import random
+
 import torch
 import torch.nn as nn
-import torchaudio
 import sounddevice as sd
-import numpy as np
 from torch.utils.data import Dataset, DataLoader
 from torch.optim import AdamW
 
+from audio_io import load_waveform, save_waveform
 from audio_processing import preprocess, get_mel_transform, SAMPLE_RATE, NUM_SAMPLES
 from model import VoiceCommandCNN
-from config import TrainConfig, InferenceConfig
+from config import InferenceConfig, TrainConfig, repo_path
 
 
-RECORDINGS_DIR = "./recordings"
+RECORDINGS_DIR = repo_path("recordings")
 
 
 def record_samples():
@@ -47,17 +47,17 @@ def record_samples():
         print(f"\n--- Command: '{cmd}' ({existing} existing) ---")
 
         for i in range(existing, samples_per_command):
-            input(f"  [{i+1}/{samples_per_command}] Press Enter, then say '{cmd}': ")
+            input(f"  [{i + 1}/{samples_per_command}] Press Enter, then say '{cmd}': ")
             print("    Recording 1 second...", end="", flush=True)
 
-            audio = sd.rec(NUM_SAMPLES, samplerate=SAMPLE_RATE,
-                          channels=1, dtype="float32")
+            audio = sd.rec(
+                NUM_SAMPLES, samplerate=SAMPLE_RATE, channels=1, dtype="float32"
+            )
             sd.wait()
             print(" done.")
 
             filepath = os.path.join(cmd_dir, f"{cmd}_{i:04d}.wav")
-            waveform = torch.from_numpy(audio.T)
-            torchaudio.save(filepath, waveform, SAMPLE_RATE)
+            save_waveform(filepath, audio, SAMPLE_RATE)
 
     print(f"\nRecording complete! Files in {RECORDINGS_DIR}/")
     print("Run: python finetune.py --train")
@@ -81,8 +81,9 @@ class RecordingsDataset(Dataset):
                 continue
             for f in os.listdir(cmd_dir):
                 if f.endswith(".wav"):
-                    self.samples.append((os.path.join(cmd_dir, f),
-                                        self.label_to_idx[label]))
+                    self.samples.append(
+                        (os.path.join(cmd_dir, f), self.label_to_idx[label])
+                    )
 
         print(f"Loaded {len(self.samples)} recordings")
 
@@ -95,7 +96,7 @@ class RecordingsDataset(Dataset):
         augmentation when enabled.
         """
         path, label_idx = self.samples[idx]
-        waveform, sr = torchaudio.load(path)
+        waveform, sr = load_waveform(path)
 
         if self.augment:
             noise = torch.randn_like(waveform) * 0.005
@@ -116,8 +117,7 @@ def finetune():
     """
     config = InferenceConfig()
 
-    checkpoint = torch.load(config.model_path, map_location="cpu",
-                            weights_only=True)
+    checkpoint = torch.load(config.model_path, map_location="cpu", weights_only=True)
     labels = checkpoint["labels"]
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -136,6 +136,7 @@ def finetune():
     criterion = nn.CrossEntropyLoss()
 
     print(f"\nFine-tuning for 20 epochs on {len(dataset)} samples...")
+    acc = 0.0
     for epoch in range(20):
         model.train()
         total_loss = 0
@@ -155,7 +156,9 @@ def finetune():
             total += target.size(0)
 
         acc = correct / total
-        print(f"  Epoch {epoch+1}/20: loss={total_loss/len(loader):.4f} acc={acc:.4f}")
+        print(
+            f"  Epoch {epoch + 1}/20: loss={total_loss / len(loader):.4f} acc={acc:.4f}"
+        )
 
     save_path = config.model_path.replace(".pt", "_finetuned.pt")
     save_data = {

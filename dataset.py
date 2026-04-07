@@ -5,11 +5,13 @@ Downloads automatically on first run.
 
 import os
 import random
+from typing import List, Tuple
+
 import torch
 import torchaudio
 from torch.utils.data import Dataset, DataLoader, Subset
-from typing import Tuple, List
 
+from audio_io import load_waveform
 from audio_processing import preprocess, get_mel_transform, SAMPLE_RATE, NUM_SAMPLES
 from config import TrainConfig
 
@@ -55,10 +57,14 @@ class SpeechCommandsDataset(Dataset):
             elif label != "_background_noise_":
                 unknown_indices.append(i)
 
-        max_per_class = max(
-            sum(1 for _, l in self.samples if l == idx)
-            for idx in range(len(config.commands))
-        ) if self.samples else 1000
+        max_per_class = (
+            max(
+                sum(1 for _, l in self.samples if l == idx)
+                for idx in range(len(config.commands))
+            )
+            if self.samples
+            else 1000
+        )
         random.shuffle(unknown_indices)
         unknown_idx = self.label_to_idx["_unknown"]
         for i in unknown_indices[:max_per_class]:
@@ -85,7 +91,8 @@ class SpeechCommandsDataset(Dataset):
             waveform = torch.randn(1, NUM_SAMPLES) * 0.01
             sample_rate = SAMPLE_RATE
         else:
-            waveform, sample_rate, *_ = self.dataset[dataset_idx]
+            path = self.dataset._walker[dataset_idx]
+            waveform, sample_rate = load_waveform(path)
 
         if self.augment:
             waveform = self._augment(waveform, sample_rate)
@@ -126,7 +133,9 @@ class SpeechCommandsDataset(Dataset):
             new_len = int(orig_len / speed)
             if new_len > 0:
                 waveform = torch.nn.functional.interpolate(
-                    waveform.unsqueeze(0), size=new_len, mode="linear",
+                    waveform.unsqueeze(0),
+                    size=new_len,
+                    mode="linear",
                     align_corners=False,
                 ).squeeze(0)
 

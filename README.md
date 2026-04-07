@@ -43,6 +43,8 @@ This downloads the Google Speech Commands v2 dataset (~2.3 GB) and trains for 30
 
 If you already trained the model on another machine, copying `models/voice_command_model.pt` into this repo also works.
 
+This repo uses `soundfile` for WAV file reads and writes during training and fine-tuning. The normal workflow does not require TorchCodec or FFmpeg.
+
 ## Usage
 
 ```bash
@@ -68,6 +70,7 @@ python inference.py --debug
 - `sounddevice` needs a working PortAudio installation. On Arch Linux, install the `portaudio` package.
 - The GUI uses `tkinter`. On Arch Linux, install the `tk` package.
 - Keyboard output uses `pynput`. On Linux, that means X11/Xwayland or `uinput` access. Pure Wayland sessions may not support global key injection.
+- Training and fine-tuning currently assume WAV audio. If you add other formats later, you may need an FFmpeg/TorchCodec-based stack.
 - The checkpoint path is resolved relative to the repo, but the file still has to exist on that machine.
 
 ## How it works

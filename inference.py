@@ -3,19 +3,19 @@ Real-time voice command recognition with keyboard output.
 Run: python inference.py
 """
 
-import os
 import sys
 import time
 import threading
 from collections.abc import Mapping
 from pathlib import Path
-from typing import TYPE_CHECKING, TypedDict, cast
+from typing import TYPE_CHECKING, NotRequired, TypedDict, cast
 import numpy as np
 import torch
 import sounddevice as sd
 from collections import deque
 
 from audio_processing import preprocess, get_mel_transform, SAMPLE_RATE, NUM_SAMPLES
+from keyboard_backend import load_keyboard_backend
 from model import VoiceCommandCNN
 from config import InferenceConfig
 
@@ -29,49 +29,25 @@ class CheckpointData(TypedDict):
 
     model_state_dict: Mapping[str, torch.Tensor]
     labels: list[str]
-    num_classes: int
     val_acc: float
     epoch: int
-
-
-def format_keyboard_backend_error(exc: Exception) -> str:
-    """Explain common platform-specific pynput failures."""
-    base = "Keyboard control is unavailable because pynput could not start."
-
-    if sys.platform.startswith("linux"):
-        display = os.environ.get("DISPLAY")
-        session_type = os.environ.get("XDG_SESSION_TYPE", "unknown")
-        if not display:
-            return (
-                f"{base} Linux session type is '{session_type}' and DISPLAY is unset. "
-                "pynput needs X11/Xwayland, or Linux uinput access as root. "
-                f"Original error: {exc}"
-            )
-        return (
-            f"{base} On Linux, pynput depends on X11/Xwayland or uinput access. "
-            f"Original error: {exc}"
-        )
-
-    return f"{base} Original error: {exc}"
+    num_classes: NotRequired[int]
 
 
 def create_keyboard_controller() -> tuple[
     "Controller", dict[str, "str | Key | KeyCode"]
 ]:
     """Create the pynput keyboard controller lazily with better diagnostics."""
-    try:
-        from pynput.keyboard import Controller, Key
-    except Exception as exc:
-        raise RuntimeError(format_keyboard_backend_error(exc)) from exc
+    controller, key = load_keyboard_backend()
 
-    return Controller(), {
-        "up": Key.up,
-        "down": Key.down,
-        "left": Key.left,
-        "right": Key.right,
-        "space": Key.space,
-        "escape": Key.esc,
-        "Return": Key.enter,
+    return controller, {
+        "up": key.up,
+        "down": key.down,
+        "left": key.left,
+        "right": key.right,
+        "space": key.space,
+        "escape": key.esc,
+        "Return": key.enter,
     }
 
 
