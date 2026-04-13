@@ -20,6 +20,15 @@ if TYPE_CHECKING:
 
 SPECIAL_KEYS = {}
 
+DARK_BG = "#1e1e1e"
+DARK_PANEL = "#252526"
+DARK_PANEL_2 = "#2d2d30"
+DARK_FG = "#f3f3f3"
+DARK_MUTED = "#c8c8c8"
+DARK_ACCENT = "#007acc"
+DARK_ACCENT_HOVER = "#1a86d9"
+DARK_BORDER = "#3c3c3c"
+
 
 def create_ui_keyboard_controller() -> tuple[
     "Controller", dict[str, "str | Key | KeyCode"]
@@ -64,12 +73,62 @@ class VoiceCommandApp:
         self.root = master
         self.root.title("Voice Command Controller")
         self.root.resizable(False, False)
+        self.root.configure(bg=DARK_BG)
 
         style = ttk.Style()
-        for theme in ("aqua", "clam", "vista", "default"):
+        for theme in ("clam", "alt", "default"):
             if theme in style.theme_names():
                 style.theme_use(theme)
                 break
+
+        style.configure(".", background=DARK_BG, foreground=DARK_FG)
+        style.configure("TFrame", background=DARK_BG)
+        style.configure("TLabel", background=DARK_BG, foreground=DARK_FG)
+        style.configure("TLabelframe", background=DARK_BG, foreground=DARK_FG)
+        style.configure("TLabelframe.Label", background=DARK_BG, foreground=DARK_FG)
+        style.configure("TButton", background=DARK_PANEL_2, foreground=DARK_FG)
+        style.map(
+            "TButton",
+            background=[("active", DARK_ACCENT), ("pressed", DARK_ACCENT_HOVER)],
+            foreground=[("active", DARK_FG), ("pressed", DARK_FG)],
+        )
+        style.configure(
+            "TCombobox",
+            fieldbackground=DARK_PANEL_2,
+            background=DARK_PANEL_2,
+            foreground=DARK_FG,
+            arrowcolor=DARK_FG,
+        )
+        style.map(
+            "TCombobox",
+            fieldbackground=[("readonly", DARK_PANEL_2)],
+            foreground=[("readonly", DARK_FG)],
+            background=[("readonly", DARK_PANEL_2)],
+        )
+        style.configure(
+            "TSpinbox",
+            fieldbackground=DARK_PANEL_2,
+            background=DARK_PANEL_2,
+            foreground=DARK_FG,
+            arrowcolor=DARK_FG,
+        )
+        style.configure(
+            "Treeview",
+            background=DARK_PANEL,
+            fieldbackground=DARK_PANEL,
+            foreground=DARK_FG,
+            bordercolor=DARK_BORDER,
+            lightcolor=DARK_BORDER,
+            darkcolor=DARK_BORDER,
+            rowheight=24,
+        )
+        style.map("Treeview", background=[("selected", DARK_ACCENT)])
+        style.configure(
+            "Treeview.Heading",
+            background=DARK_PANEL_2,
+            foreground=DARK_FG,
+            relief="flat",
+        )
 
         self.config = InferenceConfig()
         self.commands = {}
@@ -276,7 +335,19 @@ class VoiceCommandApp:
             row=6, column=0, columnspan=4, pady=(0, 5)
         )
 
-        self.log_text = tk.Text(frame, height=8, width=58, state="disabled")
+        self.log_text = tk.Text(
+            frame,
+            height=8,
+            width=58,
+            state="disabled",
+            bg=DARK_PANEL,
+            fg=DARK_FG,
+            insertbackground=DARK_FG,
+            relief="flat",
+            highlightthickness=1,
+            highlightbackground=DARK_BORDER,
+            highlightcolor=DARK_ACCENT,
+        )
         self.log_text.grid(row=7, column=0, columnspan=4, pady=5)
 
     def _add_default_bindings(self):
