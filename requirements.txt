@@ -8,3 +8,4 @@ scikit-learn==1.8.0
 pandas==3.0.1
 pynput==1.8.1
 soundfile==0.13.1
+rich==15.0.0

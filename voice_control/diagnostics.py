@@ -71,12 +71,12 @@ class DiagnosticResult:
             f"[{self.label}] "
             f"wall={self.wall_seconds * 1000:.2f}ms "
             f"cpu={self.cpu_seconds * 1000:.2f}ms "
-            f"py_peak={_format_bytes(self.python_peak_bytes)} "
-            f"rss_delta={_format_bytes(self.rss_delta_bytes)}"
+            f"py_peak={format_bytes(self.python_peak_bytes)} "
+            f"rss_delta={format_bytes(self.rss_delta_bytes)}"
         )
 
 
-def _get_process_rss_bytes() -> int:
+def get_process_rss_bytes() -> int:
     """
     Return the process peak RSS in bytes.
 
@@ -89,7 +89,7 @@ def _get_process_rss_bytes() -> int:
     return raw * unit
 
 
-def _format_bytes(n: int) -> str:
+def format_bytes(n: int) -> str:
     """Human-readable IEC formatter. Handles negative deltas for deallocation."""
     sign = "-" if n < 0 else ""
     value = float(abs(n))
@@ -124,7 +124,7 @@ def diagnose(label: str = "block") -> Iterator[DiagnosticResult]:
     else:
         tracemalloc.reset_peak()
 
-    rss_before = _get_process_rss_bytes()
+    rss_before = get_process_rss_bytes()
     wall_start = time.perf_counter()
     cpu_start = time.process_time()
     try:
@@ -135,7 +135,7 @@ def diagnose(label: str = "block") -> Iterator[DiagnosticResult]:
         _, result.python_peak_bytes = tracemalloc.get_traced_memory()
         if tracemalloc_started_here:
             tracemalloc.stop()
-        result.rss_delta_bytes = _get_process_rss_bytes() - rss_before
+        result.rss_delta_bytes = get_process_rss_bytes() - rss_before
 
 
 def measure(
@@ -183,7 +183,7 @@ def report_model_footprint(model, label: str = "model") -> int:
         total_bytes += param.numel() * param.element_size()
 
     logger.info(
-        f"[{label}] params={total_params:,} bytes={_format_bytes(total_bytes)}"
+        f"[{label}] params={total_params:,} bytes={format_bytes(total_bytes)}"
     )
     return total_bytes
 
@@ -193,7 +193,7 @@ def report_checkpoint_size(path: str, label: str = "checkpoint") -> int:
     import os
 
     size = os.path.getsize(path)
-    logger.info(f"[{label}] path={path} size={_format_bytes(size)}")
+    logger.info(f"[{label}] path={path} size={format_bytes(size)}")
     return size
 
 

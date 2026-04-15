@@ -4,22 +4,26 @@ Run: python -m voice_control.runtime.inference
 """
 
 import logging
+import os
+import select
 import sys
 import time
 import threading
 from collections.abc import Mapping
 from pathlib import Path
-from typing import TYPE_CHECKING, NotRequired, TypedDict, cast
+from typing import TYPE_CHECKING, Any, NotRequired, TypedDict, cast
 import numpy as np
 import torch
 import sounddevice as sd
 from collections import deque
+from rich.live import Live
 
 from voice_control.audio.processing import preprocess, get_mel_transform, SAMPLE_RATE, NUM_SAMPLES
 from voice_control.config import InferenceConfig
 from voice_control.diagnostics import diagnose, report_model_footprint
-from voice_control.log_config import configure_logging
+from voice_control.log_config import configure_logging, get_console
 from voice_control.model import VoiceCommandCNN
+from voice_control.runtime.dashboard import Dashboard
 from voice_control.runtime.keyboard_backend import load_keyboard_backend
 
 
@@ -55,6 +59,74 @@ def create_keyboard_controller() -> tuple[
         "escape": key.esc,
         "Return": key.enter,
     }
+
+
+class _StdinSuppressor:
+    """Swallow stdin while Live is up.
+
+    pynput dispatches real OS keys, and those land in the terminal's pty
+    input buffer whether or not anything's reading them. If we leave
+    them there, the shell reads them back on exit and replays every
+    voice command as history navigation. Putting stdin in cbreak mode
+    and actively draining it with a daemon thread eats the bytes as
+    they arrive, so the buffer stays empty the whole run. Cbreak keeps
+    ISIG on, so Ctrl+C still fires SIGINT normally. Windows and
+    non-tty stdin get a no-op."""
+
+    def __init__(self) -> None:
+        self._fd: int | None = None
+        self._saved: list[Any] | None = None
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def __enter__(self) -> "_StdinSuppressor":
+        if sys.platform == "win32" or not sys.stdin.isatty():
+            return self
+        try:
+            import termios
+            import tty
+        except ImportError:
+            return self
+        fd = sys.stdin.fileno()
+        self._saved = termios.tcgetattr(fd)
+        tty.setcbreak(fd)
+        self._fd = fd
+        self._thread = threading.Thread(target=self._drain, daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        del _exc
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=0.5)
+        if self._fd is None or self._saved is None:
+            return
+        try:
+            import termios
+
+            termios.tcflush(self._fd, termios.TCIFLUSH)
+            termios.tcsetattr(self._fd, termios.TCSADRAIN, self._saved)
+        except (OSError, ValueError):
+            pass
+
+    def _drain(self) -> None:
+        fd = self._fd
+        if fd is None:
+            return
+        while not self._stop.is_set():
+            try:
+                ready, _, _ = select.select([fd], [], [], 0.1)
+            except (OSError, ValueError):
+                return
+            if not ready:
+                continue
+            try:
+                os.read(fd, 4096)
+            except BlockingIOError:
+                continue
+            except OSError:
+                return
 
 
 def get_default_input_device() -> int | None:
@@ -95,7 +167,6 @@ class VoiceController:
         self._capture_channels = 1
         self._active_channel = 0
         self._input_device = None
-
         self.device = torch.device(
             self.config.device if torch.cuda.is_available() else "cpu"
         )
@@ -135,9 +206,20 @@ class VoiceController:
             if not label.startswith("_"):
                 self._command_indices.append(i)
 
-        logger.info(f"Commands: {[self.labels[i] for i in self._command_indices]}")
+        command_labels = [self.labels[i] for i in self._command_indices]
+        logger.info(f"Commands: {command_labels}")
         logger.info(f"Key map: {self.config.key_map}")
         logger.info(f"Confidence threshold: {self.config.confidence_threshold}")
+
+        self._dashboard = Dashboard(
+            console=get_console(),
+            model_path=str(model_path),
+            val_acc=float(checkpoint["val_acc"]),
+            epoch=int(checkpoint["epoch"]),
+            device=str(self.device),
+            commands=command_labels,
+            confidence_threshold=self.config.confidence_threshold,
+        )
 
     def _press_key(self, key_name: str):
         """Press a keyboard key using pynput (works on macOS, Linux, Windows)."""
@@ -274,6 +356,7 @@ class VoiceController:
                 if seg_rms > level:
                     level = seg_rms
             is_speech = level >= self._vad_threshold
+            self._dashboard.set_mic_level(float(level))
 
             if self.debug:
                 bar = "#" * int(min(level / self._vad_threshold, 5) * 10)
@@ -283,10 +366,12 @@ class VoiceController:
                 )
 
             if not is_speech:
+                self._dashboard.set_status("LISTENING", "green")
                 self._prev_prediction = None
                 self._streak = 0
                 self._quiet_count += 1
                 return
+            self._dashboard.set_status("SPEECH", "yellow")
             self._quiet_count = 0
 
             waveform = torch.from_numpy(audio).unsqueeze(0)
@@ -308,11 +393,17 @@ class VoiceController:
         @param waveform: Audio tensor from the sliding window.
         @param t_capture: perf_counter stamp at capture, used for end-to-end latency.
         """
+        t_pre = time.perf_counter()
         mel = preprocess(waveform, self._capture_sample_rate, self.mel_transform)
         mel = mel.unsqueeze(0).to(self.device)
-
+        t_fwd = time.perf_counter()
         logits = self.model(mel)
         probs = torch.softmax(logits, dim=1)[0]
+        t_end = time.perf_counter()
+        self._dashboard.record_classification(
+            (t_fwd - t_pre) * 1000,
+            (t_end - t_fwd) * 1000,
+        )
 
         best_idx = int(probs.argmax().item())
         best_label = self.labels[best_idx]
@@ -344,8 +435,8 @@ class VoiceController:
                     self._buffer.clear()
                     self._samples_since_last_classify = 0
                     self._press_key(key)
-                    logger.info(
-                        f"[{best_label}] conf={best_prob:.3f} latency={latency_ms:.1f}ms"
+                    self._dashboard.record_fire(
+                        best_label, float(best_prob), latency_ms
                     )
 
     def _calibrate_noise(self, device: int | None = None):
@@ -415,6 +506,12 @@ class VoiceController:
         InputStream's context alive — returning early closes the stream."""
         input_device = self._prepare_input_stream(None)
         self._calibrate_noise(input_device)
+        device_info = cast(dict[str, object], sd.query_devices(input_device))
+        device_name = str(device_info.get("name", f"device {input_device}"))
+        self._dashboard.set_mic_config(
+            device_name, self._capture_sample_rate, self._vad_threshold
+        )
+        self._dashboard.set_status("LISTENING", "green")
         logger.info(
             f"Listening on input device {input_device} "
             f"(rate={self._capture_sample_rate}Hz, model={SAMPLE_RATE}Hz)"
@@ -423,18 +520,27 @@ class VoiceController:
 
         self.running = True
         try:
-            with sd.InputStream(
-                samplerate=self._capture_sample_rate,
-                channels=self._capture_channels,
-                dtype="float32",
-                blocksize=self._chunk_samples,
-                callback=self._audio_callback,
-                device=input_device,
+            with _StdinSuppressor(), Live(
+                self._dashboard,
+                console=get_console(),
+                refresh_per_second=6,
+                screen=True,
+                transient=False,
             ):
-                while self.running:
-                    time.sleep(0.1)
+                with sd.InputStream(
+                    samplerate=self._capture_sample_rate,
+                    channels=self._capture_channels,
+                    dtype="float32",
+                    blocksize=self._chunk_samples,
+                    callback=self._audio_callback,
+                    device=input_device,
+                ):
+                    while self.running:
+                        time.sleep(0.1)
         except KeyboardInterrupt:
             logger.info("Stopped.")
+        finally:
+            self._dashboard.print_summary()
 
     def test_latency(self):
         """Measure inference latency."""
