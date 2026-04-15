@@ -30,4 +30,10 @@ python -m voice_control.runtime.inference   # CLI
 python -m voice_control.runtime.ui          # GUI
 ```
 
+The CLI launches a live dashboard with mic level, per-stage latencies,
+memory, and the last few commands — press Ctrl+C to stop and see the
+session summary.
+
+![CLI dashboard](figures/dashboard.png)
+
 To retrain from scratch: `python scripts/download_model.py`.
