@@ -10,12 +10,12 @@ import torch.nn as nn
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
-from config import TrainConfig
-from diagnostics import diagnose
-from log_config import configure_logging
-from model import VoiceCommandCNN
-from dataset import create_dataloaders
-from audio_processing import SAMPLE_RATE, N_MELS
+from voice_control.audio.processing import SAMPLE_RATE, N_MELS
+from voice_control.config import TrainConfig
+from voice_control.diagnostics import diagnose
+from voice_control.log_config import configure_logging
+from voice_control.model import VoiceCommandCNN
+from voice_control.training.dataset import create_dataloaders
 
 
 logger = logging.getLogger(__name__)

@@ -14,9 +14,10 @@ from typing import TYPE_CHECKING
 
 import sounddevice as sd
 
-from config import InferenceConfig
-from inference import VoiceController, get_default_input_device
-from keyboard_backend import load_keyboard_backend
+from voice_control.config import InferenceConfig
+from voice_control.log_config import configure_logging
+from voice_control.runtime.inference import VoiceController, get_default_input_device
+from voice_control.runtime.keyboard_backend import load_keyboard_backend
 
 if TYPE_CHECKING:
     from pynput.keyboard import Controller, Key, KeyCode
@@ -190,7 +191,7 @@ class VoiceCommandApp:
         def patched_classify(waveform, t_capture):
             import time
             import torch
-            from audio_processing import preprocess
+            from voice_control.audio.processing import preprocess
 
             mel = preprocess(
                 waveform,
@@ -420,7 +421,7 @@ class VoiceCommandApp:
                 controller.running = True
                 with sd.InputStream(
                     samplerate=controller._capture_sample_rate,
-                    channels=1,
+                    channels=controller._capture_channels,
                     dtype="float32",
                     blocksize=controller._chunk_samples,
                     callback=controller._audio_callback,
@@ -517,6 +518,7 @@ class VoiceCommandApp:
 
 
 def main():
+    configure_logging()
     app_root = tk.Tk()
     VoiceCommandApp(app_root)
     app_root.mainloop()

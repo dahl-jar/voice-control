@@ -1,7 +1,7 @@
 """
 Download dataset and train the voice command model.
 
-Run: python download_model.py
+Run: python scripts/download_model.py
 
 This will:
   1. Download the Google Speech Commands v2 dataset (~2.3 GB)
@@ -12,8 +12,15 @@ This will:
 import logging
 import os
 import sys
+from pathlib import Path
 
-from log_config import configure_logging
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+
+from voice_control.log_config import configure_logging
 
 
 logger = logging.getLogger(__name__)
@@ -33,7 +40,7 @@ def check_dependencies():
 
 
 def check_model_exists():
-    from config import TrainConfig
+    from voice_control.config import TrainConfig
     config = TrainConfig()
     if os.path.exists(config.model_path):
         logger.info(f"Model already exists at {config.model_path}")
@@ -45,7 +52,7 @@ def check_model_exists():
 
 def download_dataset():
     """Downloads Google Speech Commands v2. Importing the dataset triggers the download."""
-    from config import TrainConfig
+    from voice_control.config import TrainConfig
     config = TrainConfig()
     logger.info(f"Downloading Google Speech Commands v2 to {config.data_dir}/...")
     os.makedirs(config.data_dir, exist_ok=True)
@@ -65,7 +72,7 @@ def download_dataset():
 
 def train_model():
     logger.info("Starting training...")
-    from train import train
+    from voice_control.training.train import train
     train()
 
 
@@ -80,12 +87,12 @@ def main():
     download_dataset()
     train_model()
 
-    from config import TrainConfig
+    from voice_control.config import TrainConfig
     config = TrainConfig()
     if os.path.exists(config.model_path):
         size_mb = os.path.getsize(config.model_path) / (1024 * 1024)
         logger.info(f"Model saved to {config.model_path} ({size_mb:.1f} MB)")
-        logger.info("You can now run: python inference.py")
+        logger.info("You can now run: python -m voice_control.runtime.inference")
     else:
         logger.error("Training finished but no model was saved. Check for errors above.")
         sys.exit(1)

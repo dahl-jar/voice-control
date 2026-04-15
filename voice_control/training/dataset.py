@@ -14,9 +14,9 @@ import torch
 import torchaudio
 from torch.utils.data import Dataset, DataLoader, Subset
 
-from audio_io import load_waveform
-from audio_processing import preprocess, get_mel_transform, SAMPLE_RATE, NUM_SAMPLES
-from config import TrainConfig
+from voice_control.audio.io import load_waveform
+from voice_control.audio.processing import preprocess, get_mel_transform, SAMPLE_RATE, NUM_SAMPLES
+from voice_control.config import TrainConfig
 
 
 class SpeechCommandsDataset(Dataset):

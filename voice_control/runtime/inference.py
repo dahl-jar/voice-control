@@ -1,6 +1,6 @@
 """
 Real-time voice command recognition with keyboard output.
-Run: python inference.py
+Run: python -m voice_control.runtime.inference
 """
 
 import logging
@@ -15,12 +15,12 @@ import torch
 import sounddevice as sd
 from collections import deque
 
-from audio_processing import preprocess, get_mel_transform, SAMPLE_RATE, NUM_SAMPLES
-from diagnostics import diagnose, report_model_footprint
-from keyboard_backend import load_keyboard_backend
-from log_config import configure_logging
-from model import VoiceCommandCNN
-from config import InferenceConfig
+from voice_control.audio.processing import preprocess, get_mel_transform, SAMPLE_RATE, NUM_SAMPLES
+from voice_control.config import InferenceConfig
+from voice_control.diagnostics import diagnose, report_model_footprint
+from voice_control.log_config import configure_logging
+from voice_control.model import VoiceCommandCNN
+from voice_control.runtime.keyboard_backend import load_keyboard_backend
 
 
 logger = logging.getLogger(__name__)
@@ -92,6 +92,8 @@ class VoiceController:
         self._streak = 0
         self._quiet_count = 0
         self._capture_sample_rate = SAMPLE_RATE
+        self._capture_channels = 1
+        self._active_channel = 0
         self._input_device = None
 
         self.device = torch.device(
@@ -196,7 +198,13 @@ class VoiceController:
         self._samples_since_last_classify = 0
 
     def _prepare_input_stream(self, device: int | None) -> int:
-        """Resolve the selected microphone and capture at its native input rate."""
+        """
+        Resolve the selected microphone and open its native rate and
+        channel count. We open all input channels the device reports
+        (not just 1) because some interfaces — e.g. the Scarlett Solo
+        4th Gen — route the physical mic input to a channel other than
+        0. The active channel is picked during calibration.
+        """
         input_device = self._resolve_input_device(device)
         device_info = cast(dict[str, object], sd.query_devices(input_device))
         default_sample_rate = device_info.get("default_samplerate")
@@ -208,15 +216,24 @@ class VoiceController:
                 f"Input device {input_device} does not report a valid sample rate."
             )
 
+        raw_channel_count = device_info.get("max_input_channels")
+        if not isinstance(raw_channel_count, (int, float)) or raw_channel_count <= 0:
+            raise RuntimeError(
+                f"Input device {input_device} reports no input channels."
+            )
+        capture_channels = int(raw_channel_count)
+
         capture_sample_rate = int(round(default_sample_rate))
         sd.check_input_settings(
             device=input_device,
             samplerate=capture_sample_rate,
-            channels=1,
+            channels=capture_channels,
             dtype="float32",
         )
 
         self._input_device = input_device
+        self._capture_channels = capture_channels
+        self._active_channel = 0
         self._configure_capture_timing(capture_sample_rate)
         return input_device
 
@@ -235,7 +252,7 @@ class VoiceController:
         if status:
             logger.warning(f"Audio status: {status}")
 
-        samples = indata[:, 0]
+        samples = indata[:, self._active_channel]
         self._buffer.extend(samples.tolist())
         self._samples_since_last_classify += frames
 
@@ -343,29 +360,54 @@ class VoiceController:
         audio = sd.rec(
             self._capture_sample_rate * 2,
             samplerate=self._capture_sample_rate,
-            channels=1,
+            channels=self._capture_channels,
             dtype="float32",
             device=input_device,
         )
         sd.wait()
-        bg_rms = float(np.sqrt(np.mean(audio**2)))
+
+        per_channel_rms = [
+            float(np.sqrt(np.mean(audio[:, ch] ** 2)))
+            for ch in range(self._capture_channels)
+        ]
+
+        physical_channel_limit = 2
+        searchable = min(self._capture_channels, physical_channel_limit)
+        self._active_channel = int(
+            max(range(searchable), key=lambda ch: per_channel_rms[ch])
+        )
+        bg_rms = per_channel_rms[self._active_channel]
+
+        if self._capture_channels > 1:
+            formatted = ", ".join(
+                f"ch{i}={r:.6f}" for i, r in enumerate(per_channel_rms)
+            )
+            logger.info(
+                f"Per-channel RMS: [{formatted}] — using channel {self._active_channel}"
+            )
+            if self._capture_channels > physical_channel_limit:
+                logger.info(
+                    f"Device reports {self._capture_channels} input channels; "
+                    f"restricting auto-pick to channels 0-{physical_channel_limit - 1} "
+                    "to avoid loopback/virtual channels."
+                )
+
         raw_threshold = bg_rms * 2.0
-        vad_ceiling = 0.01
         vad_floor = 0.001
-        self._vad_threshold = max(min(raw_threshold, vad_ceiling), vad_floor)
+        self._vad_threshold = max(raw_threshold, vad_floor)
         logger.info(f"Background RMS: {bg_rms:.6f}, VAD threshold: {self._vad_threshold:.6f}")
 
-        if raw_threshold > vad_ceiling:
-            logger.warning(
-                f"Background noise is high (bg_rms={bg_rms:.6f}); VAD threshold clamped "
-                f"to ceiling {vad_ceiling}. Quiet commands may be missed — consider "
-                "moving to a quieter environment or using a closer/better mic."
-            )
-        elif raw_threshold < vad_floor:
+        if raw_threshold < vad_floor:
             logger.warning(
                 f"Background noise is very low (bg_rms={bg_rms:.6f}); VAD threshold "
                 f"clamped to floor {vad_floor}. This can cause false triggers on tiny "
                 "mic spikes — check that calibration ran without you speaking."
+            )
+        elif bg_rms > 0.02:
+            logger.warning(
+                f"Background noise is high (bg_rms={bg_rms:.6f}). VAD threshold is "
+                f"{self._vad_threshold:.4f} — quiet commands may be missed. Lower "
+                "the preamp gain on your audio interface or move closer to the mic."
             )
 
     def run(self):
@@ -383,7 +425,7 @@ class VoiceController:
         try:
             with sd.InputStream(
                 samplerate=self._capture_sample_rate,
-                channels=1,
+                channels=self._capture_channels,
                 dtype="float32",
                 blocksize=self._chunk_samples,
                 callback=self._audio_callback,

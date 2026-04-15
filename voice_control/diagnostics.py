@@ -8,7 +8,7 @@ Python heap usage, and eyeballing them from logs doesn't cut it.
 Everything here is stdlib (tracemalloc + resource + time.perf_counter),
 so there's no extra dependency to install. Two ways to use it:
 
-    from diagnostics import measure, diagnose
+    from voice_control.diagnostics import measure, diagnose
 
     @measure("classify")
     def hot_path(...): ...
@@ -17,7 +17,7 @@ so there's no extra dependency to install. Two ways to use it:
         model = VoiceCommandCNN(...)
     sys.stdout.write(d.format_line() + "\\n")
 
-Run `python diagnostics.py` to get a one-shot report on the current
+Run `python -m voice_control.diagnostics` to get a one-shot report on the current
 checkpoint — loading cost, preprocessing cost, forward-pass cost, and
 end-to-end latency, each with memory deltas.
 """
@@ -211,9 +211,9 @@ def _run_cli_report() -> None:
     """
     import torch
 
-    from audio_processing import NUM_SAMPLES, SAMPLE_RATE, get_mel_transform, preprocess
-    from config import InferenceConfig
-    from model import VoiceCommandCNN
+    from voice_control.audio.processing import NUM_SAMPLES, SAMPLE_RATE, get_mel_transform, preprocess
+    from voice_control.config import InferenceConfig
+    from voice_control.model import VoiceCommandCNN
 
     config = InferenceConfig()
 
@@ -260,7 +260,7 @@ def _run_cli_report() -> None:
 
 
 if __name__ == "__main__":
-    from log_config import configure_logging
+    from voice_control.log_config import configure_logging
 
     configure_logging()
     _run_cli_report()

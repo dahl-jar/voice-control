@@ -18,11 +18,11 @@ import sounddevice as sd
 from torch.utils.data import Dataset, DataLoader
 from torch.optim import AdamW
 
-from audio_io import load_waveform, save_waveform
-from audio_processing import preprocess, get_mel_transform, SAMPLE_RATE, NUM_SAMPLES
-from log_config import configure_logging
-from model import VoiceCommandCNN
-from config import InferenceConfig, TrainConfig, repo_path
+from voice_control.audio.io import load_waveform, save_waveform
+from voice_control.audio.processing import preprocess, get_mel_transform, SAMPLE_RATE, NUM_SAMPLES
+from voice_control.log_config import configure_logging
+from voice_control.model import VoiceCommandCNN
+from voice_control.config import InferenceConfig, TrainConfig, repo_path
 
 
 logger = logging.getLogger(__name__)
