@@ -1,43 +1,49 @@
 """
-Training script. Run: python train.py
+Training loop. Saves best checkpoint by val_acc (not final) because
+the LR scheduler can push the model past its peak in later epochs.
 """
 
+import logging
 import os
-import json
 import torch
 import torch.nn as nn
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 from config import TrainConfig
+from diagnostics import diagnose
+from log_config import configure_logging
 from model import VoiceCommandCNN
 from dataset import create_dataloaders
-from audio_processing import get_mel_transform, SAMPLE_RATE, N_MELS
+from audio_processing import SAMPLE_RATE, N_MELS
+
+
+logger = logging.getLogger(__name__)
 
 
 def train():
     """
-    Train the voice command model.
+    Run the full training loop and save the best checkpoint.
 
-    Labels are: sorted commands + _unknown + _silence.
-    Uses AdamW optimizer with ReduceLROnPlateau scheduler.
-    Saves the best model checkpoint by validation accuracy.
+    AdamW (decoupled weight decay), ReduceLROnPlateau on val_acc
+    (loss can drop while accuracy stalls). Checkpoint bakes in
+    `labels`/`num_classes` so inference can't drift from config.
     """
     config = TrainConfig()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Device: {device}")
+    logger.info(f"Device: {device}")
 
     labels = sorted(config.commands) + ["_unknown", "_silence"]
     num_classes = len(labels)
-    print(f"Classes ({num_classes}): {labels}")
+    logger.info(f"Classes ({num_classes}): {labels}")
 
-    print("Loading dataset (downloads on first run)...")
+    logger.info("Loading dataset (downloads on first run)...")
     train_loader, val_loader = create_dataloaders(config)
-    print(f"Train batches: {len(train_loader)}, Val batches: {len(val_loader)}")
+    logger.info(f"Train batches: {len(train_loader)}, Val batches: {len(val_loader)}")
 
     model = VoiceCommandCNN(num_classes=num_classes).to(device)
     param_count = sum(p.numel() for p in model.parameters())
-    print(f"Model parameters: {param_count:,}")
+    logger.info(f"Model parameters: {param_count:,}")
 
     criterion = nn.CrossEntropyLoss()
     optimizer = AdamW(model.parameters(), lr=config.learning_rate,
@@ -47,6 +53,9 @@ def train():
                                    factor=config.lr_scheduler_factor)
 
     best_val_acc = 0.0
+    prev_val_acc = 0.0
+    consecutive_regressions = 0
+    overfit_warn_threshold = 3
     os.makedirs(os.path.dirname(config.model_path), exist_ok=True)
 
     for epoch in range(config.epochs):
@@ -70,9 +79,9 @@ def train():
             train_total += target.size(0)
 
             if (batch_idx + 1) % 20 == 0:
-                print(f"  Epoch {epoch+1}/{config.epochs} "
-                      f"[{batch_idx+1}/{len(train_loader)}] "
-                      f"loss={loss.item():.4f}")
+                logger.info(f"  Epoch {epoch+1}/{config.epochs} "
+                            f"[{batch_idx+1}/{len(train_loader)}] "
+                            f"loss={loss.item():.4f}")
 
         train_acc = train_correct / train_total
 
@@ -98,14 +107,28 @@ def train():
         val_acc = val_correct / val_total
         scheduler.step(val_acc)
 
-        print(f"\nEpoch {epoch+1}/{config.epochs}: "
-              f"train_acc={train_acc:.4f} val_acc={val_acc:.4f} "
-              f"lr={optimizer.param_groups[0]['lr']:.6f}")
+        if val_acc < prev_val_acc:
+            consecutive_regressions += 1
+        else:
+            consecutive_regressions = 0
+        prev_val_acc = val_acc
+
+        if consecutive_regressions >= overfit_warn_threshold:
+            logger.warning(
+                f"val_acc has regressed {consecutive_regressions} epochs in a row "
+                f"while train_acc={train_acc:.4f} — possible overfit. The best "
+                f"checkpoint at val_acc={best_val_acc:.4f} is still on disk; "
+                "consider early-stopping or lowering the LR further."
+            )
+
+        logger.info(f"Epoch {epoch+1}/{config.epochs}: "
+                    f"train_acc={train_acc:.4f} val_acc={val_acc:.4f} "
+                    f"lr={optimizer.param_groups[0]['lr']:.6f}")
 
         for i, label in enumerate(labels):
             if per_class_total[i] > 0:
                 acc = per_class_correct[i] / per_class_total[i]
-                print(f"  {label:>10s}: {acc:.4f} ({per_class_correct[i]}/{per_class_total[i]})")
+                logger.info(f"  {label:>10s}: {acc:.4f} ({per_class_correct[i]}/{per_class_total[i]})")
 
         if val_acc > best_val_acc:
             best_val_acc = val_acc
@@ -121,13 +144,14 @@ def train():
                 },
             }
             torch.save(save_data, config.model_path)
-            print(f"  -> Saved best model (val_acc={val_acc:.4f})")
+            logger.info(f"  -> Saved best model (val_acc={val_acc:.4f})")
 
-        print()
-
-    print(f"Training complete. Best val_acc: {best_val_acc:.4f}")
-    print(f"Model saved to: {config.model_path}")
+    logger.info(f"Training complete. Best val_acc: {best_val_acc:.4f}")
+    logger.info(f"Model saved to: {config.model_path}")
 
 
 if __name__ == "__main__":
-    train()
+    configure_logging()
+    with diagnose("training_total") as training_diag:
+        train()
+    logger.info(training_diag.format_line())

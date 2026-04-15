@@ -1,17 +1,16 @@
 """
-Single source of truth for ALL audio preprocessing.
-Both training and inference MUST use these functions.
-This eliminates train/inference mismatch.
+Feature extraction shared by train and inference — both must call
+`preprocess` to avoid silent train/serve skew.
+
+Constants are baked into the checkpoint; changing them invalidates
+the model. Output shape: (1, N_MELS, 101).
 """
 
 import torch
 import torchaudio
 import torchaudio.transforms as T
 
-"""
-Audio format constants. Changing these requires retraining.
-Computed output shape: (1, N_MELS, time_steps) where time_steps = NUM_SAMPLES // HOP_LENGTH + 1 = 101.
-"""
+
 SAMPLE_RATE = 16000
 DURATION_SEC = 1.0
 NUM_SAMPLES = int(SAMPLE_RATE * DURATION_SEC)
@@ -22,7 +21,7 @@ HOP_LENGTH = 160
 
 
 def get_mel_transform() -> T.MelSpectrogram:
-    """Returns the mel spectrogram transform. Use this everywhere."""
+    """Build the MelSpectrogram op used by train and inference."""
     return T.MelSpectrogram(
         sample_rate=SAMPLE_RATE,
         n_fft=N_FFT,
@@ -33,7 +32,7 @@ def get_mel_transform() -> T.MelSpectrogram:
 
 
 def pad_or_trim(waveform: torch.Tensor) -> torch.Tensor:
-    """Pad or trim waveform to exactly NUM_SAMPLES. Works on any shape (..., time)."""
+    """Force waveform length to NUM_SAMPLES on the last dim."""
     length = waveform.shape[-1]
     if length > NUM_SAMPLES:
         waveform = waveform[..., :NUM_SAMPLES]
@@ -46,16 +45,15 @@ def pad_or_trim(waveform: torch.Tensor) -> torch.Tensor:
 def preprocess(waveform: torch.Tensor, sample_rate: int,
                mel_transform: T.MelSpectrogram) -> torch.Tensor:
     """
-    THE preprocessing function. Used identically in training and inference.
+    Raw waveform -> log mel spectrogram. Must stay byte-identical
+    between train and inference — retrain if you touch this.
 
-    Ensures 2D mono input, resamples if needed, normalizes amplitude,
-    pads/trims to fixed length, then computes log mel spectrogram
-    (with small epsilon to avoid log(0)).
+    Log uses a 1e-9 floor so silent frames don't go to -inf.
 
-    @param waveform: Raw audio tensor, shape (channels, time) or (time,).
-    @param sample_rate: Original sample rate of the audio.
-    @param mel_transform: From get_mel_transform().
-    @returns: Log mel spectrogram, shape (1, N_MELS, time_steps).
+    @param waveform: Raw audio, (C, T) or (T,).
+    @param sample_rate: Source rate. Resampled to SAMPLE_RATE if mismatched.
+    @param mel_transform: Instance from `get_mel_transform()`.
+    @returns: Log mel spectrogram, (1, N_MELS, 101).
     """
     if waveform.dim() == 1:
         waveform = waveform.unsqueeze(0)

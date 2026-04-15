@@ -1,9 +1,13 @@
 """
-Voice Command GUI — thin tkinter wrapper around inference.py's VoiceController.
-Run: python ui.py
+Tk GUI wrapper around VoiceController. Thin on purpose — monkey-patches
+_press_key and _classify so predictions can be pushed into the Tk event
+loop (see _monkey_patch_controller).
+
+Does not work reliably on Linux — use inference.py directly there.
 """
 
 import threading
+import traceback
 import tkinter as tk
 from tkinter import ttk
 from typing import TYPE_CHECKING
@@ -159,14 +163,16 @@ class VoiceCommandApp:
         self._add_default_bindings()
         self._monkey_patch_controller()
         self.confidence_var.trace_add("write", self._sync_confidence)
-        self.load_input_devices()
+        self.refresh_input_devices()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.status_var.set("Ready — press Start Commands")
 
     def _monkey_patch_controller(self):
         """
-        Replace _press_key and the stdout writes in VoiceController
-        with pynput key presses and UI callbacks.
+        Swap _press_key and _classify so they route through the GUI's
+        binding table and marshal widget updates via root.after —
+        sounddevice's callback runs on a non-GUI thread and Tk breaks
+        if you touch widgets from outside the main thread.
         """
         assert self.controller is not None
         controller = self.controller
@@ -241,7 +247,7 @@ class VoiceCommandApp:
                         )
                         self.root.after(
                             0,
-                            self._log,
+                            self._append_log_line,
                             f"[{best_label}] conf={best_prob:.3f} latency={latency_ms:.1f}ms",
                         )
                         self.root.after(
@@ -269,7 +275,7 @@ class VoiceCommandApp:
         ttk.Button(
             mic_frame,
             text="Refresh",
-            command=self.load_input_devices,
+            command=self.refresh_input_devices,
         ).grid(row=0, column=2, padx=5, pady=5)
 
         ttk.Label(mic_frame, textvariable=self.mic_status_var).grid(
@@ -424,9 +430,12 @@ class VoiceCommandApp:
                         import time
 
                         time.sleep(0.1)
-            except Exception as e:
+            except Exception:
+                tb = traceback.format_exc()
+                self.root.after(0, self._append_log_line, tb)
                 self.root.after(0, self.mic_status_var.set, "Microphone off")
-                self.root.after(0, self.status_var.set, f"Audio error: {e}")
+                self.root.after(0, self.status_var.set, "Audio error — see log")
+                raise
             finally:
                 controller.running = False
                 self.root.after(0, start_btn.config, {"text": "Start Commands"})
@@ -451,20 +460,21 @@ class VoiceCommandApp:
         except (tk.TclError, ValueError):
             pass
 
-    def _log(self, message):
+    def _append_log_line(self, message):
         assert self.log_text is not None
         self.log_text.config(state="normal")
         self.log_text.insert("end", message + "\n")
         self.log_text.see("end")
         self.log_text.config(state="disabled")
 
-    def load_input_devices(self):
+    def refresh_input_devices(self):
         assert self.mic_dropdown is not None
         current = self.device_var.get().strip()
         try:
             devices = sd.query_devices()
         except Exception:
-            return
+            self.mic_status_var.set("Cannot query audio devices")
+            raise
 
         labels = []
         for i, d in enumerate(devices):
@@ -507,12 +517,9 @@ class VoiceCommandApp:
 
 
 def main():
-    try:
-        app_root = tk.Tk()
-        VoiceCommandApp(app_root)
-        app_root.mainloop()
-    except Exception as exc:
-        raise SystemExit(str(exc)) from exc
+    app_root = tk.Tk()
+    VoiceCommandApp(app_root)
+    app_root.mainloop()
 
 
 if __name__ == "__main__":

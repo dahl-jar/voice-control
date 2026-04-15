@@ -1,24 +1,30 @@
 """
-Small CNN for keyword spotting. Fast inference (~2-5ms on GPU, ~10ms on CPU).
+4-block CNN for keyword spotting.
+
+Kept small on purpose (~250k params) so each inference fits well
+inside the 75ms audio stride — a slower model would back up the
+audio thread and drop frames.
 """
 
 import torch
 import torch.nn as nn
-from audio_processing import N_MELS
 
 
 class VoiceCommandCNN(nn.Module):
     def __init__(self, num_classes: int):
         """
-        4-block CNN feature extractor followed by adaptive pooling classifier.
+        Conv stack over (1, 40, 101) log mel, then adaptive-pooled head.
+        AdaptiveAvgPool2d(1) means the classifier is decoupled from
+        spatial dims — conv stack can be retuned without touching
+        the Linear layer.
 
-        Feature block shapes:
+        Shapes:
             Block 1: (1, 40, 101) -> (32, 20, 50)
             Block 2: (32, 20, 50) -> (64, 10, 25)
             Block 3: (64, 10, 25) -> (128, 5, 12)
             Block 4: (128, 5, 12) -> (128, 2, 6)
 
-        @param num_classes: Number of output classes.
+        @param num_classes: commands + _unknown + _silence.
         """
         super().__init__()
         self.features = nn.Sequential(

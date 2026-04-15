@@ -1,6 +1,9 @@
 """
-Dataset loader for Google Speech Commands v2.
-Downloads automatically on first run.
+Google Speech Commands v2 loader.
+
+Non-target keywords are pooled into `_unknown` and subsampled to
+prevent class imbalance. `_silence` is synthesized from low-amplitude
+noise because GSC only ships ~6 background clips.
 """
 
 import os
@@ -17,18 +20,15 @@ from config import TrainConfig
 
 
 class SpeechCommandsDataset(Dataset):
-    """Wraps torchaudio's SpeechCommands with our preprocessing."""
+    """Torchaudio SPEECHCOMMANDS wrapper that applies our preprocessing and rebalances classes."""
 
     def __init__(self, config: TrainConfig, augment: bool = False):
         """
-        Downloads and loads Google Speech Commands, filtering and balancing classes.
-
-        Labels are: sorted commands + "_unknown" + "_silence".
-        Unknowns are subsampled to balance with the largest command class.
-        Synthetic silence samples are added at the same count.
+        Load GSC and build a balanced sample list. Silence slots use
+        dataset_idx = -1 and are generated on the fly in __getitem__.
 
         @param config: Training configuration.
-        @param augment: Whether to apply data augmentation.
+        @param augment: Toggle augmentation. Off for validation.
         """
         self.config = config
         self.augment = augment
@@ -78,13 +78,7 @@ class SpeechCommandsDataset(Dataset):
         return len(self.samples)
 
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, int]:
-        """
-        Returns (mel_spectrogram, label_index) for the given sample.
-
-        Silence samples (dataset_idx == -1) are generated as small random noise.
-        Augmentation is applied only during training. Uses the same preprocessing
-        pipeline as inference.
-        """
+        """Fetch (mel, label_idx). dataset_idx == -1 generates synthetic silence."""
         dataset_idx, label_idx = self.samples[idx]
 
         if dataset_idx == -1:
@@ -103,9 +97,8 @@ class SpeechCommandsDataset(Dataset):
 
     def _augment(self, waveform: torch.Tensor, sample_rate: int) -> torch.Tensor:
         """
-        Data augmentation applied ONLY during training.
-
-        Applies time shift, additive noise, and speed perturbation via resampling.
+        Training-only perturbations: time shift, additive noise, speed.
+        Never call from val/inference.
 
         @param waveform: Raw audio tensor.
         @param sample_rate: Sample rate of the waveform.

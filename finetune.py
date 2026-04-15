@@ -1,11 +1,13 @@
 """
-Fine-tune on YOUR voice recordings for better accuracy.
+Fine-tune the base model on recordings from one speaker.
 
-Usage:
-  1. Record samples:  python finetune.py --record
-  2. Fine-tune model:  python finetune.py --train
+  --record : captures WAVs into recordings/<command>/
+  --train  : short low-LR pass from the base checkpoint
+
+LR stays well below base training LR to avoid catastrophic forgetting.
 """
 
+import logging
 import os
 import sys
 import random
@@ -18,49 +20,57 @@ from torch.optim import AdamW
 
 from audio_io import load_waveform, save_waveform
 from audio_processing import preprocess, get_mel_transform, SAMPLE_RATE, NUM_SAMPLES
+from log_config import configure_logging
 from model import VoiceCommandCNN
 from config import InferenceConfig, TrainConfig, repo_path
+
+
+logger = logging.getLogger(__name__)
 
 
 RECORDINGS_DIR = repo_path("recordings")
 
 
 def record_samples():
-    """Interactive recording session for each command."""
+    """
+    Interactive recording session, one command at a time. Resumes from
+    whatever's already on disk. Enter-gated (not auto-triggered) so
+    speaker pacing doesn't mess with the window alignment.
+    """
     config = TrainConfig()
     commands = sorted(config.commands)
 
-    print("=== Voice Recording Session ===")
-    print(f"Commands to record: {commands}")
-    print(f"You'll record each command multiple times.")
-    print(f"Recordings saved to: {RECORDINGS_DIR}/\n")
+    logger.info("=== Voice Recording Session ===")
+    logger.info(f"Commands to record: {commands}")
+    logger.info("You'll record each command multiple times.")
+    logger.info(f"Recordings saved to: {RECORDINGS_DIR}/")
 
     samples_per_command = 50
-    print(f"Target: {samples_per_command} recordings per command")
-    print("Press Enter to start recording, speak the command, wait 1 second.\n")
+    logger.info(f"Target: {samples_per_command} recordings per command")
+    logger.info("Press Enter to start recording, speak the command, wait 1 second.")
 
     for cmd in commands:
         cmd_dir = os.path.join(RECORDINGS_DIR, cmd)
         os.makedirs(cmd_dir, exist_ok=True)
 
         existing = len([f for f in os.listdir(cmd_dir) if f.endswith(".wav")])
-        print(f"\n--- Command: '{cmd}' ({existing} existing) ---")
+        logger.info(f"--- Command: '{cmd}' ({existing} existing) ---")
 
         for i in range(existing, samples_per_command):
             input(f"  [{i + 1}/{samples_per_command}] Press Enter, then say '{cmd}': ")
-            print("    Recording 1 second...", end="", flush=True)
+            logger.info("Recording 1 second...")
 
             audio = sd.rec(
                 NUM_SAMPLES, samplerate=SAMPLE_RATE, channels=1, dtype="float32"
             )
             sd.wait()
-            print(" done.")
+            logger.info("done.")
 
             filepath = os.path.join(cmd_dir, f"{cmd}_{i:04d}.wav")
             save_waveform(filepath, audio, SAMPLE_RATE)
 
-    print(f"\nRecording complete! Files in {RECORDINGS_DIR}/")
-    print("Run: python finetune.py --train")
+    logger.info(f"Recording complete! Files in {RECORDINGS_DIR}/")
+    logger.info("Run: python finetune.py --train")
 
 
 class RecordingsDataset(Dataset):
@@ -85,7 +95,7 @@ class RecordingsDataset(Dataset):
                         (os.path.join(cmd_dir, f), self.label_to_idx[label])
                     )
 
-        print(f"Loaded {len(self.samples)} recordings")
+        logger.info(f"Loaded {len(self.samples)} recordings")
 
     def __len__(self):
         return len(self.samples)
@@ -110,10 +120,9 @@ class RecordingsDataset(Dataset):
 
 def finetune():
     """
-    Fine-tune the base model on your recordings.
-
-    Loads the base checkpoint, creates a dataset from recorded samples,
-    and fine-tunes with a low learning rate to preserve base knowledge.
+    Short fine-tune from the base checkpoint on local recordings.
+    LR=1e-4 (1/10 of base), 20 epochs. Saves as `*_finetuned.pt` so
+    the base checkpoint stays intact as a fallback.
     """
     config = InferenceConfig()
 
@@ -123,11 +132,11 @@ def finetune():
 
     model = VoiceCommandCNN(num_classes=len(labels)).to(device)
     model.load_state_dict(checkpoint["model_state_dict"])
-    print(f"Loaded base model (val_acc={checkpoint['val_acc']:.4f})")
+    logger.info(f"Loaded base model (val_acc={checkpoint['val_acc']:.4f})")
 
     dataset = RecordingsDataset(labels, augment=True)
     if len(dataset) == 0:
-        print("No recordings found! Run: python finetune.py --record")
+        logger.error("No recordings found! Run: python finetune.py --record")
         return
 
     loader = DataLoader(dataset, batch_size=16, shuffle=True)
@@ -135,7 +144,7 @@ def finetune():
     optimizer = AdamW(model.parameters(), lr=1e-4, weight_decay=1e-4)
     criterion = nn.CrossEntropyLoss()
 
-    print(f"\nFine-tuning for 20 epochs on {len(dataset)} samples...")
+    logger.info(f"Fine-tuning for 20 epochs on {len(dataset)} samples...")
     acc = 0.0
     for epoch in range(20):
         model.train()
@@ -156,7 +165,7 @@ def finetune():
             total += target.size(0)
 
         acc = correct / total
-        print(
+        logger.info(
             f"  Epoch {epoch + 1}/20: loss={total_loss / len(loader):.4f} acc={acc:.4f}"
         )
 
@@ -171,17 +180,18 @@ def finetune():
         "finetuned": True,
     }
     torch.save(save_data, save_path)
-    print(f"\nFine-tuned model saved to: {save_path}")
-    print(f"To use it, update model_path in config.py or run:")
-    print(f"  python inference.py  (after updating config.py)")
+    logger.info(f"Fine-tuned model saved to: {save_path}")
+    logger.info("To use it, update model_path in config.py or run:")
+    logger.info("  python inference.py  (after updating config.py)")
 
 
 if __name__ == "__main__":
+    configure_logging()
     if "--record" in sys.argv:
         record_samples()
     elif "--train" in sys.argv:
         finetune()
     else:
-        print("Usage:")
-        print("  python finetune.py --record   Record your voice samples")
-        print("  python finetune.py --train    Fine-tune model on recordings")
+        logger.info("Usage:")
+        logger.info("  python finetune.py --record   Record your voice samples")
+        logger.info("  python finetune.py --train    Fine-tune model on recordings")

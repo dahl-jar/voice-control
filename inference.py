@@ -3,6 +3,7 @@ Real-time voice command recognition with keyboard output.
 Run: python inference.py
 """
 
+import logging
 import sys
 import time
 import threading
@@ -15,9 +16,14 @@ import sounddevice as sd
 from collections import deque
 
 from audio_processing import preprocess, get_mel_transform, SAMPLE_RATE, NUM_SAMPLES
+from diagnostics import diagnose, report_model_footprint
 from keyboard_backend import load_keyboard_backend
+from log_config import configure_logging
 from model import VoiceCommandCNN
 from config import InferenceConfig
+
+
+logger = logging.getLogger(__name__)
 
 
 if TYPE_CHECKING:
@@ -68,12 +74,12 @@ def get_default_input_device() -> int | None:
 class VoiceController:
     def __init__(self, config: InferenceConfig | None = None, debug: bool = False):
         """
-        Loads the model checkpoint, initializes the mel transform (same as training,
-        kept on CPU since audio comes from mic), sets up the audio buffer, and builds
-        the command index for fast lookup (skipping _unknown and _silence).
+        Wire up everything the hot path needs before the mic opens.
+        Mel transform stays on CPU — audio arrives from sounddevice
+        in numpy land and round-tripping to GPU isn't worth it.
 
         @param config: Inference configuration. Defaults to InferenceConfig().
-        @param debug: Whether to print debug output.
+        @param debug: Print per-frame VAD/prediction traces for tuning.
         """
         self.config = config or InferenceConfig()
         self.debug = debug
@@ -91,7 +97,7 @@ class VoiceController:
         self.device = torch.device(
             self.config.device if torch.cuda.is_available() else "cpu"
         )
-        print(f"Device: {self.device}")
+        logger.info(f"Device: {self.device}")
 
         model_path = Path(self.config.model_path).expanduser().resolve()
         if not model_path.is_file():
@@ -102,17 +108,21 @@ class VoiceController:
                 "into the repo's models directory."
             )
 
-        checkpoint = self._load_checkpoint(model_path)
-        self.labels = checkpoint["labels"]
-        num_classes = len(self.labels)
+        with diagnose("model_load") as load_diag:
+            checkpoint = self._load_checkpoint(model_path)
+            self.labels = checkpoint["labels"]
+            num_classes = len(self.labels)
 
-        self.model = VoiceCommandCNN(num_classes=num_classes).to(self.device)
-        self.model.load_state_dict(checkpoint["model_state_dict"])
-        self.model.eval()
-        print(
+            self.model = VoiceCommandCNN(num_classes=num_classes).to(self.device)
+            self.model.load_state_dict(checkpoint["model_state_dict"])
+            self.model.eval()
+        logger.info(
             f"Model loaded (val_acc={checkpoint['val_acc']:.4f}, "
             f"epoch {checkpoint['epoch']})"
         )
+
+        logger.info(load_diag.format_line())
+        report_model_footprint(self.model)
 
         self.mel_transform = get_mel_transform()
 
@@ -123,9 +133,9 @@ class VoiceController:
             if not label.startswith("_"):
                 self._command_indices.append(i)
 
-        print(f"Commands: {[self.labels[i] for i in self._command_indices]}")
-        print(f"Key map: {self.config.key_map}")
-        print(f"Confidence threshold: {self.config.confidence_threshold}")
+        logger.info(f"Commands: {[self.labels[i] for i in self._command_indices]}")
+        logger.info(f"Key map: {self.config.key_map}")
+        logger.info(f"Confidence threshold: {self.config.confidence_threshold}")
 
     def _press_key(self, key_name: str):
         """Press a keyboard key using pynput (works on macOS, Linux, Windows)."""
@@ -210,21 +220,20 @@ class VoiceController:
         self._configure_capture_timing(capture_sample_rate)
         return input_device
 
-    def _dbg(self, msg: str):
-        if self.debug:
-            sys.stdout.write(f"    DBG {msg}\n")
-            sys.stdout.flush()
+    def _print_debug(self, msg: str):
+        logger.debug(msg)
 
     def _audio_callback(self, indata, frames, time_info, status):
         """
-        Called by sounddevice for each audio chunk.
+        sounddevice callback. Ring-buffers audio, runs VAD every stride.
 
-        Performs VAD by checking peak RMS energy in any 200ms segment across the window
-        (catches short words like "left" that may not be at the tail). Dispatches
-        classification in a separate thread when speech is detected.
+        VAD takes peak RMS across 200ms sub-segments (not full-window)
+        so short words like "left" don't get diluted by surrounding
+        silence. Inference runs on a daemon thread — blocking this
+        callback drops audio frames.
         """
         if status:
-            print(f"Audio status: {status}")
+            logger.warning(f"Audio status: {status}")
 
         samples = indata[:, 0]
         self._buffer.extend(samples.tolist())
@@ -252,7 +261,7 @@ class VoiceController:
             if self.debug:
                 bar = "#" * int(min(level / self._vad_threshold, 5) * 10)
                 state = "SPEECH" if is_speech else "quiet"
-                self._dbg(
+                self._print_debug(
                     f"lvl={level:.5f} [{bar:<50}] {state} streak={self._streak} prev={self._prev_prediction} fired={self._last_fired}"
                 )
 
@@ -272,14 +281,15 @@ class VoiceController:
     @torch.no_grad()
     def _classify(self, waveform: torch.Tensor, t_capture: float):
         """
-        Run inference on a waveform window.
+        Forward pass + debouncing. Runs off the audio thread.
 
-        Non-command predictions reset the streak. Tracks consecutive same predictions
-        regardless of confidence. Fires immediately if very confident (>0.99),
-        otherwise requires 2 consecutive agreeing predictions above the threshold.
+        Debounce: conf >= 0.99 fires on a single hit, otherwise require
+        two consecutive agreeing predictions. `_unknown`/`_silence`
+        resets the streak. Buffer is cleared after firing to prevent
+        double-triggers on the same window.
 
-        @param waveform: Audio tensor from the buffer window.
-        @param t_capture: perf_counter timestamp at capture time for latency measurement.
+        @param waveform: Audio tensor from the sliding window.
+        @param t_capture: perf_counter stamp at capture, used for end-to-end latency.
         """
         mel = preprocess(waveform, self._capture_sample_rate, self.mel_transform)
         mel = mel.unsqueeze(0).to(self.device)
@@ -291,7 +301,7 @@ class VoiceController:
         best_label = self.labels[best_idx]
         best_prob = probs[best_idx].item()
 
-        self._dbg(f"  classify: {best_label}={best_prob:.3f}")
+        self._print_debug(f"  classify: {best_label}={best_prob:.3f}")
 
         if best_label.startswith("_"):
             self._prev_prediction = None
@@ -317,19 +327,18 @@ class VoiceController:
                     self._buffer.clear()
                     self._samples_since_last_classify = 0
                     self._press_key(key)
-                    sys.stdout.write(
-                        f"  [{best_label}] conf={best_prob:.3f} latency={latency_ms:.1f}ms\n"
+                    logger.info(
+                        f"[{best_label}] conf={best_prob:.3f} latency={latency_ms:.1f}ms"
                     )
-                    sys.stdout.flush()
 
     def _calibrate_noise(self, device: int | None = None):
         """
-        Record 2 seconds of silence to set VAD threshold above background noise.
-
-        Sets the threshold to 2x background RMS, capped between 0.001 and 0.01.
+        Sample 2s of the room, set VAD threshold to 2x bg RMS,
+        clamped to [0.001, 0.01]. Clamp range covers bad mics that
+        report near-zero or absurdly high floors.
         """
         input_device = self._prepare_input_stream(device)
-        print("Calibrating background noise — stay QUIET for 2 seconds...")
+        logger.info("Calibrating background noise — stay QUIET for 2 seconds...")
         time.sleep(0.5)
         audio = sd.rec(
             self._capture_sample_rate * 2,
@@ -339,20 +348,36 @@ class VoiceController:
             device=input_device,
         )
         sd.wait()
-        bg_rms = np.sqrt(np.mean(audio**2))
-        self._vad_threshold = min(bg_rms * 2.0, 0.01)
-        self._vad_threshold = max(self._vad_threshold, 0.001)
-        print(f"Background RMS: {bg_rms:.6f}, VAD threshold: {self._vad_threshold:.6f}")
+        bg_rms = float(np.sqrt(np.mean(audio**2)))
+        raw_threshold = bg_rms * 2.0
+        vad_ceiling = 0.01
+        vad_floor = 0.001
+        self._vad_threshold = max(min(raw_threshold, vad_ceiling), vad_floor)
+        logger.info(f"Background RMS: {bg_rms:.6f}, VAD threshold: {self._vad_threshold:.6f}")
+
+        if raw_threshold > vad_ceiling:
+            logger.warning(
+                f"Background noise is high (bg_rms={bg_rms:.6f}); VAD threshold clamped "
+                f"to ceiling {vad_ceiling}. Quiet commands may be missed — consider "
+                "moving to a quieter environment or using a closer/better mic."
+            )
+        elif raw_threshold < vad_floor:
+            logger.warning(
+                f"Background noise is very low (bg_rms={bg_rms:.6f}); VAD threshold "
+                f"clamped to floor {vad_floor}. This can cause false triggers on tiny "
+                "mic spikes — check that calibration ran without you speaking."
+            )
 
     def run(self):
-        """Start listening and processing voice commands."""
+        """Open the mic and block until Ctrl+C. Sleep loop keeps
+        InputStream's context alive — returning early closes the stream."""
         input_device = self._prepare_input_stream(None)
         self._calibrate_noise(input_device)
-        print(
-            f"\nListening on input device {input_device} "
-            f"(rate={self._capture_sample_rate}Hz, model={SAMPLE_RATE}Hz)..."
+        logger.info(
+            f"Listening on input device {input_device} "
+            f"(rate={self._capture_sample_rate}Hz, model={SAMPLE_RATE}Hz)"
         )
-        print("Speak a command. Press Ctrl+C to stop.\n")
+        logger.info("Speak a command. Press Ctrl+C to stop.")
 
         self.running = True
         try:
@@ -367,16 +392,11 @@ class VoiceController:
                 while self.running:
                     time.sleep(0.1)
         except KeyboardInterrupt:
-            print("\nStopped.")
-        except Exception as e:
-            print(f"Error: {e}")
-            print(
-                "Make sure your microphone is available and sounddevice is installed."
-            )
+            logger.info("Stopped.")
 
     def test_latency(self):
         """Measure inference latency."""
-        print("Measuring inference latency...")
+        logger.info("Measuring inference latency...")
         dummy = torch.randn(1, NUM_SAMPLES)
         mel = preprocess(dummy, SAMPLE_RATE, self.mel_transform)
         mel = mel.unsqueeze(0).to(self.device)
@@ -392,22 +412,25 @@ class VoiceController:
             times.append(elapsed)
 
         avg = sum(times) / len(times)
-        print(
+        logger.info(
             f"Inference latency: {avg:.2f}ms avg "
             f"(min={min(times):.2f}ms, max={max(times):.2f}ms)"
         )
-        print(
+        logger.info(
             f"Stride: {self.config.stride_duration_sec * 1000:.0f}ms "
             f"(classify every {self.config.stride_duration_sec * 1000:.0f}ms)"
         )
-        print(
+        logger.info(
             f"Total expected latency: ~{avg + self.config.stride_duration_sec * 1000:.0f}ms"
         )
 
 
 if __name__ == "__main__":
+    configure_logging()
     config = InferenceConfig()
     debug = "--debug" in sys.argv
+    if debug:
+        logger.setLevel(logging.DEBUG)
     controller = VoiceController(config, debug=debug)
 
     if "--latency" in sys.argv:
