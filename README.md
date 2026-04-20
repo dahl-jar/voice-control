@@ -18,6 +18,41 @@ uv sync
 `uv` will create and manage `.venv` for you, install the project package, and
 lock dependencies in `uv.lock`.
 
+### Windows
+
+Install `uv` with WinGet:
+
+```powershell
+winget install --id=astral-sh.uv -e
+```
+
+Close PowerShell, open a new window, then install the project:
+
+```powershell
+uv sync
+```
+
+If PowerShell still cannot find `uv`, create a session alias for the WinGet
+shim and retry:
+
+```powershell
+Set-Alias uv "$env:LOCALAPPDATA\Microsoft\WinGet\Links\uv.exe"
+uv sync
+```
+
+Do not reuse the same `.venv` from both WSL and PowerShell. If you ran this
+checkout from WSL first, Windows may fail with a Linux-style virtualenv error
+such as `.venv\\lib64` or an access-denied cleanup failure. Delete `.venv` and
+let Windows recreate it:
+
+```powershell
+cmd /c rmdir /s /q .venv
+uv sync
+```
+
+If you want to run the project in WSL, use a separate Linux checkout instead of
+the Windows-mounted repo under `/mnt/c/...`.
+
 Useful commands:
 
 ```bash

@@ -26,13 +26,17 @@ from __future__ import annotations
 
 import functools
 import logging
-import resource
 import sys
 import time
 import tracemalloc
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Callable, Iterator, ParamSpec, TypeVar
+
+try:
+    import resource
+except ImportError:
+    resource = None
 
 
 logger = logging.getLogger(__name__)
@@ -84,9 +88,45 @@ def get_process_rss_bytes() -> int:
     reports bytes, Linux reports kibibytes, BSDs do their own thing.
     We normalise to bytes here so callers never have to think about it.
     """
-    raw = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    unit = RSS_UNIT_BYTES_DARWIN if sys.platform == "darwin" else RSS_UNIT_BYTES_LINUX
-    return raw * unit
+    if resource is not None:
+        raw = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        unit = (
+            RSS_UNIT_BYTES_DARWIN if sys.platform == "darwin" else RSS_UNIT_BYTES_LINUX
+        )
+        return raw * unit
+
+    if sys.platform == "win32":
+        import ctypes
+        from ctypes import wintypes
+
+        class PROCESS_MEMORY_COUNTERS(ctypes.Structure):
+            _fields_ = [
+                ("cb", wintypes.DWORD),
+                ("PageFaultCount", wintypes.DWORD),
+                ("PeakWorkingSetSize", ctypes.c_size_t),
+                ("WorkingSetSize", ctypes.c_size_t),
+                ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                ("PagefileUsage", ctypes.c_size_t),
+                ("PeakPagefileUsage", ctypes.c_size_t),
+            ]
+
+        counters = PROCESS_MEMORY_COUNTERS()
+        counters.cb = ctypes.sizeof(PROCESS_MEMORY_COUNTERS)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        psapi = ctypes.WinDLL("psapi", use_last_error=True)
+        process = kernel32.GetCurrentProcess()
+        ok = psapi.GetProcessMemoryInfo(
+            process,
+            ctypes.byref(counters),
+            counters.cb,
+        )
+        if ok:
+            return int(counters.PeakWorkingSetSize)
+
+    return 0
 
 
 def format_bytes(n: int) -> str:
