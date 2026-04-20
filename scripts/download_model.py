@@ -35,7 +35,7 @@ def check_dependencies():
             missing.append(pkg)
     if missing:
         logger.error(f"Missing packages: {', '.join(missing)}")
-        logger.error("Install with: pip install -r requirements.txt")
+        logger.error("Install with: uv sync")
         sys.exit(1)
 
 

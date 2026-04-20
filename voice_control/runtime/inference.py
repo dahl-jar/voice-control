@@ -573,7 +573,7 @@ class VoiceController:
         )
 
 
-if __name__ == "__main__":
+def main() -> None:
     configure_logging()
     config = InferenceConfig()
     debug = "--debug" in sys.argv
@@ -585,3 +585,7 @@ if __name__ == "__main__":
         controller.test_latency()
     else:
         controller.run()
+
+
+if __name__ == "__main__":
+    main()

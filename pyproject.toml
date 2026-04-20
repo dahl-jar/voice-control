@@ -1,0 +1,30 @@
+[project]
+name = "voice-control"
+version = "0.1.0"
+description = "Hands-free keyboard control with local voice command inference."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "matplotlib==3.10.8",
+    "numpy==2.4.3",
+    "pandas==3.0.1",
+    "pynput==1.8.1",
+    "rich==15.0.0",
+    "scikit-learn==1.8.0",
+    "seaborn==0.13.2",
+    "sounddevice==0.5.5",
+    "soundfile==0.13.1",
+    "torch==2.11.0",
+    "torchaudio==2.11.0",
+]
+
+[project.scripts]
+voice-control = "voice_control.runtime.inference:main"
+voice-control-ui = "voice_control.runtime.ui:main"
+
+[build-system]
+requires = ["hatchling>=1.27.0"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["voice_control"]

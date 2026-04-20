@@ -12,22 +12,39 @@ Under the hood it runs a small convolutional neural network trained on Google Sp
 ## Install
 
 ```bash
-python3.12 -m venv .venv
-source .venv/bin/activate  # Windows: .\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
+uv sync
+```
+
+`uv` will create and manage `.venv` for you, install the project package, and
+lock dependencies in `uv.lock`.
+
+Useful commands:
+
+```bash
+uv add <package>
+uv remove <package>
+uv lock
+uv sync
 ```
 
 The trained model is already in `models/`, so you can run it straight away.
 
-- **macOS**: works as-is. You'll be asked to grant microphone and accessibility permissions the first time.
-- **Windows**: works as-is. Use PowerShell for the activate command shown above.
-- **Linux**: the GUI does not work — use the CLI instead. Install system packages first; on Arch: `sudo pacman -S python tk portaudio`. Pure Wayland sessions may not allow global key injection — use X11/Xwayland if keys don't fire.
+- **macOS**: you'll be asked to grant microphone and accessibility permissions the first time.
+- **Windows**: supported for the CLI and GUI.
+- **Linux**: use the CLI instead of the GUI. Install system packages first; on Arch: `sudo pacman -S python tk portaudio`. Keyboard injection depends on an X11/Xwayland session, so if `DISPLAY` is unset or you are on pure Wayland, `pynput` may fail to start.
 
 ## Run
 
 ```bash
-python -m voice_control.runtime.inference   # CLI
-python -m voice_control.runtime.ui          # GUI
+uv run python -m voice_control.runtime.inference   # CLI
+uv run python -m voice_control.runtime.ui          # GUI
+```
+
+Short aliases:
+
+```bash
+uv run voice-control
+uv run voice-control-ui
 ```
 
 The CLI launches a live dashboard with mic level, per-stage latencies,
@@ -36,4 +53,4 @@ session summary.
 
 ![CLI dashboard](figures/dashboard.png)
 
-To retrain from scratch: `python scripts/download_model.py`.
+To retrain from scratch: `uv run python scripts/download_model.py`.
